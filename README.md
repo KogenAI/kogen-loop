@@ -53,7 +53,9 @@ go build -o /dev/null ./...
 
 ## Local status and compatibility
 
-This tree adopts an external reference into a fresh native Build. External extraction history is not native authorship, approval or verification. No current Kogen consumer, synchronized copy or digest pin is claimed here. No public release, global install, remote push or Kogen synchronization is part of this delivery.
+At initial adoption, this tree adopted an external reference into a fresh native Build. External extraction history is not native authorship, approval or verification. At that first delivery, no current Kogen consumer, synchronized copy or digest pin was claimed here. No public release, global install, remote push or Kogen synchronization was part of that initial delivery.
+
+Published and pinned baseline observed on 27 October 2026, when this continuation started: public `origin` (`git@github.com:KogenAI/kogen-loop.git`) `main` was `bbf3fdd6d2e79b96eab6af23bcd6d66212893388`, and Kogen `main` at `bb663a593fb3499c2e3c86ffc27847f8ea0860cc` vendored this module through `cli/third_party/kogen-loop`, pinned in `cli/loop-pin.json` with `source_head` `bbf3fdd6d2e79b96eab6af23bcd6d66212893388`, 88 files and digest `4e1332b9f0aa686d76040466a965a43a5169ba9295631cf7bb9b8f62fb946638`. Later commits reach Kogen only when Kogen updates its own vendored copy and pin. This change does not modify Kogen, its vendored copy or its pin, install anything globally or switch a runtime.
 
 Provider/tool/sys bytes deliberately retain compatibility residues: Kogen-named credential paths, user agents, environment variables (`KOGEN_PROVIDER_URL`, `KOGEN_AUTH_URL`, `KOGEN_LOG_LEVEL`, `__kogen_supervise`), catalog metadata, model-facing texts and optional callback seams. They do not give this library ownership of Kogen delivery policy. Generic path prevention and hooks are caller-provided primitives.
 
