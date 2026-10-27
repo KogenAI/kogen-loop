@@ -3,9 +3,11 @@ package sys
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -81,18 +83,19 @@ func TestCallerShellBoundObservationFailure(t *testing.T) {
 	case observed = <-termEvent:
 	case <-time.After(3 * time.Second):
 	}
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &old); err != nil {
-		t.Fatal(err)
-	}
 	if !observed {
 		t.Fatal("timeout withheld SIGTERM while process observation failed")
 	}
 	select {
 	case got := <-done:
-		if got.err != nil || !got.result.TimedOut || got.result.Status != 0 {
+		if runtime.GOOS == "darwin" {
+			if got.err != nil || !got.result.TimedOut || got.result.Status != 0 {
+				t.Fatalf("Run = %+v, %v", got.result, got.err)
+			}
+		} else if !errors.Is(got.err, ErrTimeoutObservation) || got.result != (Result{}) {
 			t.Fatalf("Run = %+v, %v", got.result, got.err)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("timeout did not return after observation recovered")
+		t.Fatal("timeout did not return while observation fault persisted")
 	}
 }

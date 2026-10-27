@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +47,7 @@ func (o Output) Cut() Output {
 
 // Tools runs the model's tool calls in one repository. A refused or failed call is a tool
 // result (text starting `error:` or `refused:`), never a Go error; the only error is an
-// interrupt of a shell command.
+// interrupt, context stop during timeout custody, or timeout observation failure.
 type Tools struct {
 	// Root is the repository root; relative paths resolve against it.
 	Root string
@@ -77,6 +78,12 @@ const maxResult = 16_384
 
 // Run runs one tool call. The arguments are a decoded JSON object (Call.Args).
 func (t *Tools) Run(name string, args map[string]any) (Output, error) {
+	return t.RunContext(nil, name, args)
+}
+
+// RunContext runs a call, forwarding ctx only for positive ShellTimeout custody.
+// Overall execution custody remains the caller's responsibility.
+func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any) (Output, error) {
 	if !slices.Contains(t.Enabled, name) {
 		return Output{Text: "error: unknown tool " + name}, nil
 	}
@@ -92,7 +99,7 @@ func (t *Tools) Run(name string, args map[string]any) (Output, error) {
 	case SearchTextTool:
 		return Output{Text: t.searchText(args)}, nil
 	case ShellTool:
-		text, err := t.shell(args)
+		text, err := t.shell(ctx, args)
 		return Output{Text: text}, err
 	case ProbeTool:
 		text, err := t.probe(args)
@@ -104,7 +111,12 @@ func (t *Tools) Run(name string, args map[string]any) (Output, error) {
 }
 
 // Call runs a function call of a response.
-func (t *Tools) Call(c Call) (Output, error) { return t.Run(c.Name, c.Args()) }
+func (t *Tools) Call(c Call) (Output, error) { return t.CallContext(nil, c) }
+
+// CallContext runs a response call with optional positive-timeout custody cancellation.
+func (t *Tools) CallContext(ctx context.Context, c Call) (Output, error) {
+	return t.RunContext(ctx, c.Name, c.Args())
+}
 
 // ---- arguments and paths ----
 
@@ -398,12 +410,16 @@ func (t *Tools) searchText(args map[string]any) string {
 
 // shell runs /bin/sh -c in the repository root with stdin closed and ShellTimeout.
 // Only an expired timeout prefixes the ordinary exit status and combined output.
-func (t *Tools) shell(args map[string]any) (string, error) {
+func (t *Tools) shell(ctx context.Context, args map[string]any) (string, error) {
 	command, msg := stringArg(args, "command")
 	if msg != "" {
 		return msg, nil
 	}
-	res, err := t.session().Run(command, t.Root, sys.Options{Timeout: t.ShellTimeout})
+	opts := sys.Options{Timeout: t.ShellTimeout}
+	if t.ShellTimeout > 0 {
+		opts.Context = ctx
+	}
+	res, err := t.session().Run(command, t.Root, opts)
 	if err != nil {
 		return "", err
 	}

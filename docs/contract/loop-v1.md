@@ -116,7 +116,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (Res
    1. Return `ctx.Err()` if it's set.
    2. `BeforeCall(call, input ++ outs)`.
    3. If the name is in `Terminal`, mark it terminal and don't execute it. When a batch has several terminal calls, the **last** one is `Result.Terminal`, as Kogen's builder keeps it; earlier ones stay unanswered.
-   4. Otherwise take `HandleCall` if it's set and handled; if not, `out, err := Tools.Call(call)` and use `out.Cut()`. `err` is returned as a stop and is only non-nil when a shell is interrupted.
+   4. Otherwise take `HandleCall` if it's set and handled; if not, `out, err := Tools.CallContext(ctx, call)` and use `out.Cut()`. `err` is returned unchanged as a stop for shell interruption, context cancellation/deadline during positive-timeout custody, or timeout observation failure.
    5. `AfterCall(call, out, terminal, input ++ outs)`.
    6. Append `call.Output(out)` to `outs` unless the call is terminal.
 6. If no call is terminal and `len(calls) > 0`, set `input = input ++ outs` and go to step 1.
@@ -161,10 +161,34 @@ Partial output is retained, and ordinary cutting, function-call output pairing
 and replay apply. Timeout feedback may continue the round. Teardown uses the
 existing five-second SIGTERM-to-SIGKILL grace and observes whole-group
 disappearance before publishing timeout feedback. An observed Session interrupt
-wins over timeout as `*sys.Interrupted`; parent Round context cancellation remains
+wins as `*sys.Interrupted`, followed by parent context cancellation/deadline,
+then observation error or proven timeout. Parent Round context cancellation remains
 a stopping context error. Neither is tool feedback, and existing hook-error
 precedence remains unchanged. This option does not claim Kogen adoption or token
 savings.
+
+`sys.Options.Context` optionally cancels the fired positive-timeout custody wait,
+including joining teardown and waiting for observation. Nil preserves no-context
+callers. `Tools.RunContext` and `CallContext` forward it only for positive
+`ShellTimeout`; `Run` and `Call` remain nil-context wrappers. Both loop fallback
+execution and Session HandleCall forward their actual context. This is not overall
+execution custody: the loop still terminates its round's groups. Nonpositive
+execution and `FinishOnInterrupt` semantics are unchanged. Standalone
+`deadline_seconds` is already a whole-round context deadline, not this per-shell
+option; there is no SessionConfig timeout.
+
+Observation is in-process: Darwin uses numeric KERN_PROC_PGRP actual data length
+(including zombies), and Linux enumerates current /proc membership including
+zombies using the standard library. Linux is cross-built, not host lifecycle-proven
+in this correction. Other platforms explicitly lack native observation support.
+A failed or unsupported observation returns `sys.Result{}` with an error matching
+`errors.Is(err, sys.ErrTimeoutObservation)` (`timeout custody observation failed`),
+including positive-timeout callers with no Context. Timeout signals are dispatched
+independently and teardown is joined unless interruption/context takes precedence.
+This is never `error:` feedback or an ending. A slow observation cannot delay
+SIGTERM/SIGKILL or stop selection; ordinary successful observation can continue
+waiting for an owned zombie to be reaped. A live PID outside the group does not
+hold custody. No wall cap or retry budget is added.
 
 A multi-round conversation is the caller's: after a terminal call, the next round's input appends `tools.OutputItem(terminal.CallID(), feedback)`. After a no-call ending it appends a user message `{"role":"user","content":feedback}`. `loop.Session` (below) does this for standalone callers.
 

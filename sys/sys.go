@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -146,6 +147,9 @@ func (s *Session) WatchSignals() (stop func()) {
 type Options struct {
 	Env     map[string]string // added to the caller's environment
 	Timeout time.Duration     // nonpositive: no limit
+	// Context cancels only a fired positive-timeout custody wait. Nil is unbounded.
+	// The caller still owns overall execution custody (loop terminates its round groups).
+	Context context.Context
 	// FinishOnInterrupt waits for the command to end after an interrupt (git commit), so
 	// Kogen sees what it left behind (CLI-7).
 	FinishOnInterrupt bool
@@ -162,7 +166,10 @@ type Result struct {
 // Run runs `/bin/sh -c command` in dir. It returns *Interrupted when the caller
 // interrupts; nothing starts after an interrupt. A fired positive Timeout waits
 // for whole-group termination and disappearance before returning timeout feedback;
-// an observed interrupt still takes precedence and keeps its existing custody.
+// an observed interrupt wins, then Options.Context, then ErrTimeoutObservation.
+// Darwin and Linux observe native membership including zombies; other platforms
+// return ErrTimeoutObservation after teardown. Context does not change nonpositive
+// Timeout or FinishOnInterrupt behavior. The caller still owns execution custody.
 func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	s.Debug("command in " + dir + ": " + command)
 	cmd, release, err := supervised(command)
@@ -194,68 +201,52 @@ func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	s.groups[pgid] = true
 	s.mu.Unlock()
 
+	// Completion and the callback compete for ownership, not for timer.Stop's result.
+	var owner commandLifecycle
+	fired, teardown := make(chan struct{}), make(chan struct{})
 	var timer *time.Timer
-	timeoutDone := make(chan struct{})
-	timeoutPIDs := map[int]bool{}
 	if opts.Timeout > 0 {
 		timer = time.AfterFunc(opts.Timeout, func() {
-			// Darwin can stop reporting a killed group before its individual
-			// zombie PIDs disappear. Retain its members before sending signals.
-			// Observation failure must not postpone the timeout's signals (for
-			// example, ps cannot start while file descriptors are exhausted).
-			// The feedback path below still requires a successful observation.
-			members, _ := groupPIDs(pgid)
-			for _, pid := range members {
-				timeoutPIDs[pid] = true
+			if !owner.timeout() {
+				return
 			}
+			close(fired)
 			Terminate([]int{pgid})
-			close(timeoutDone)
+			close(teardown)
 		})
 		defer timer.Stop()
 	}
 	waited := make(chan struct{})
-	go func() { cmd.Wait(); close(waited) }()
+	go func() { cmd.Wait(); owner.complete(); close(waited) }()
 	select {
 	case <-waited:
+	case <-fired:
 	case <-s.done:
 		if opts.FinishOnInterrupt {
 			<-waited
 		}
 		return Result{}, s.Err()
 	}
-	// Stop winning means completion was ordinary. Otherwise the callback owns
-	// teardown: join it before publishing timeout feedback, even if the leader
-	// exited early and WaitDelay already closed inherited output descriptors.
-	timedOut := timer != nil && !timer.Stop()
+	timedOut := owner.timedOut()
 	if timedOut {
-		select {
-		case <-timeoutDone:
-		case <-s.done:
-			return Result{}, s.Err()
+		if err := s.timeoutCustody(opts.Context, pgid, teardown); err != nil {
+			if opts.FinishOnInterrupt && s.Err() != nil {
+				<-waited
+			}
+			return Result{}, err
 		}
-		// Terminate sends SIGKILL but does not wait for disappearance. Keep this
-		// extra custody wait local to timeout feedback, never shared cancellation.
-		for {
-			members, observed := groupPIDs(pgid)
-			for _, pid := range members {
-				timeoutPIDs[pid] = true
+		select {
+		case <-waited:
+		case <-s.done:
+			if opts.FinishOnInterrupt {
+				<-waited
 			}
-			alive := !observed || syscall.Kill(-pgid, 0) == nil
-			for pid := range timeoutPIDs {
-				if syscall.Kill(pid, 0) != syscall.ESRCH {
-					alive = true
-				} else {
-					delete(timeoutPIDs, pid)
-				}
-			}
-			if !alive {
-				break
-			}
-			select {
-			case <-s.done:
-				return Result{}, s.Err()
-			case <-time.After(10 * time.Millisecond):
-			}
+			return Result{}, s.Err()
+		case <-contextDone(opts.Context):
+			return Result{}, s.timeoutStop(opts.Context)
+		}
+		if err := s.timeoutStop(opts.Context); err != nil {
+			return Result{}, err
 		}
 	}
 	if err := s.Err(); err != nil {
@@ -264,27 +255,91 @@ func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	return Result{Status: exitStatus(cmd.ProcessState), Output: buf.String(), TimedOut: timedOut}, nil
 }
 
-// groupPIDs observes group members independently of kill(-pgid, 0), which
-// need not include unreaped processes on every supported host. A failed ps is
-// not evidence of disappearance; the timeout custody path retries observation.
-func groupPIDs(pgid int) ([]int, bool) {
-	output, err := exec.Command("/bin/ps", "-axo", "pid=,pgid=").Output()
-	if err != nil {
-		return nil, false
+// commandLifecycle arbitrates the command's completion against a timer callback
+// that may have been dispatched but not yet claimed teardown.
+type commandLifecycle struct{ state atomic.Int32 }
+
+func (l *commandLifecycle) complete()      { l.state.CompareAndSwap(0, 1) }
+func (l *commandLifecycle) timeout() bool  { return l.state.CompareAndSwap(0, 2) }
+func (l *commandLifecycle) timedOut() bool { return l.state.Load() == 2 }
+
+// ErrTimeoutObservation means timeout signals were dispatched but whole-group
+// absence could not be proven. It is a stopping error, never timeout feedback.
+var ErrTimeoutObservation = errors.New("timeout custody observation failed")
+
+func contextDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
 	}
-	var pids []int
-	for _, line := range strings.Split(string(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
+	return ctx.Done()
+}
+
+func (s *Session) timeoutStop(ctx context.Context) error {
+	if err := s.Err(); err != nil {
+		return err
+	}
+	if ctx != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
+type timeoutObservation struct {
+	alive bool
+	err   error
+}
+
+// A single worker owns observation for the entire wait. A blocked native query
+// cannot gate signal dispatch or stop selection, nor accumulate per-poll workers.
+func (s *Session) timeoutCustody(ctx context.Context, pgid int, teardown <-chan struct{}) error {
+	observations := make(chan timeoutObservation)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			alive, err := timeoutGroupAlive(pgid)
+			select {
+			case observations <- timeoutObservation{alive, err}:
+			case <-stop:
+				return
+			}
+			if err != nil || !alive {
+				return
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-stop:
+				return
+			}
 		}
-		group, _ := strconv.Atoi(fields[1])
-		if group == pgid {
-			pid, _ := strconv.Atoi(fields[0])
-			pids = append(pids, pid)
+	}()
+	return s.awaitTimeout(ctx, teardown, observations)
+}
+
+// Join teardown even on observation failure, unless a stopping signal wins.
+func (s *Session) awaitTimeout(ctx context.Context, teardown <-chan struct{}, observations <-chan timeoutObservation) error {
+	var observationErr error
+	absent, joined := false, false
+	for !joined || (!absent && observationErr == nil) {
+		select {
+		case <-s.done:
+			return s.timeoutStop(ctx)
+		case <-contextDone(ctx):
+			return s.timeoutStop(ctx)
+		case <-teardown:
+			joined = true
+			teardown = nil
+		case o := <-observations:
+			if o.err != nil {
+				observationErr = fmt.Errorf("%w: %v", ErrTimeoutObservation, o.err)
+			}
+			absent = !o.alive && o.err == nil
 		}
 	}
-	return pids, true
+	if err := s.timeoutStop(ctx); err != nil {
+		return err
+	}
+	return observationErr
 }
 
 // Groups lists the process groups started so far.

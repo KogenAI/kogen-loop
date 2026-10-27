@@ -1,0 +1,179 @@
+//go:build darwin
+
+package conformance
+
+import (
+    "bufio"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "os"
+    "os/exec"
+    "os/signal"
+    "path/filepath"
+    "strings"
+    "syscall"
+    "testing"
+    "time"
+    "unsafe"
+
+    "kogen-loop/loop"
+    "kogen-loop/provider"
+    "kogen-loop/sys"
+    "kogen-loop/tools"
+)
+
+type tcConfig struct { Mode string `json:"mode"`; Fault bool `json:"fault"`; Actor string `json:"actor"` }
+func tcEmit(x any) { b,e:=json.Marshal(x);if e!=nil{panic(e)};fmt.Println("TCOBS "+string(b)) }
+func tcAwait(t *testing.T,ch <-chan string,want string) {
+    t.Helper();select {case s:=<-ch:if s!=want{t.Fatalf("event %q, want %q",s,want)};case <-time.After(5*time.Second):t.Fatalf("no event %s",want)}
+}
+func tcLines(f *os.File) <-chan string {ch:=make(chan string,8);go func(){defer close(ch);s:=bufio.NewScanner(f);for s.Scan(){ch<-s.Text()}}();return ch}
+func tcPipe(t *testing.T,dir,name string) <-chan string {
+    t.Helper();p:=filepath.Join(dir,name);if e:=syscall.Mkfifo(p,0600);e!=nil{t.Fatal(e)};f,e:=os.OpenFile(p,os.O_RDWR,0600);if e!=nil{t.Fatal(e)};t.Cleanup(func(){f.Close()});return tcLines(f)
+}
+// Start actor commands before the descriptor fault. They belong initially to the
+// shell group, but the harness, not the shell, owns their wait/reap.
+func TestTimeoutCustodyActor(t *testing.T) {
+    mode:=os.Getenv("TC_ACTOR");if mode==""{t.Fatal("actor invoked without mode")}
+    signal.Ignore(syscall.SIGTERM)
+    fmt.Println("actor-ready")
+    if mode=="zombie"{os.Exit(0)}
+    s:=bufio.NewScanner(os.Stdin);if !s.Scan()||s.Text()!="move"{os.Exit(4)}
+    if e:=syscall.Setpgid(0,0);e!=nil{os.Exit(5)};fmt.Println("moved")
+    if !s.Scan(){os.Exit(0)};os.Exit(6)
+}
+type tcActor struct { cmd *exec.Cmd; input *os.File; lines <-chan string; waited bool }
+func tcStartActor(t *testing.T,mode string,g int) *tcActor {
+    t.Helper();c:=exec.Command(os.Args[0],"-test.run=^TestTimeoutCustodyActor$")
+    c.Env=append(os.Environ(),"TC_ACTOR="+mode);c.SysProcAttr=&syscall.SysProcAttr{Setpgid:true,Pgid:g}
+    in,e:=c.StdinPipe();if e!=nil{t.Fatal(e)};out,e:=c.StdoutPipe();if e!=nil{t.Fatal(e)}
+    a:=&tcActor{cmd:c,input:in.(*os.File),lines:tcLines(out.(*os.File))}
+    if e=c.Start();e!=nil{t.Fatal(e)}
+    t.Cleanup(func(){a.input.Close();if !a.waited{c.Process.Kill();c.Wait();a.waited=true}})
+    tcAwait(t,a.lines,"actor-ready");return a
+}
+func (a *tcActor) reap(t *testing.T) {t.Helper();if !a.waited{if e:=a.cmd.Wait();e!=nil{t.Fatal(e)};a.waited=true}}
+func tcZombie(t *testing.T,p int) {
+    t.Helper();until:=time.Now().Add(3*time.Second)
+    for time.Now().Before(until){b,e:=exec.Command("/bin/ps","-o","stat=","-p",fmt.Sprint(p)).Output();if e==nil && strings.HasPrefix(strings.TrimSpace(string(b)),"Z"){return};time.Sleep(5*time.Millisecond)}
+    t.Fatal("owned actor did not become a zombie")
+}
+func tcNative(g int)(int,error) {
+    mib:=[4]int32{1,14,2,int32(g)};n:=uintptr(0)
+    _,_,e:=syscall.Syscall6(syscall.SYS___SYSCTL,uintptr(unsafe.Pointer(&mib[0])),4,0,uintptr(unsafe.Pointer(&n)),0,0)
+    if e!=0{return 0,e};b:=make([]byte,n+65536);n=uintptr(len(b))
+    _,_,e=syscall.Syscall6(syscall.SYS___SYSCTL,uintptr(unsafe.Pointer(&mib[0])),4,uintptr(unsafe.Pointer(&b[0])),uintptr(unsafe.Pointer(&n)),0,0)
+    if e!=0{return 0,e};return int(n),nil
+}
+func TestTimeoutCustodyHost(t *testing.T) {
+    if os.Getenv("TC_HELPER")!="TestTimeoutCustodyHost" {
+        tcOuter(t,"TestTimeoutCustodyHost");return
+    }
+    a:=tcStartActor(t,"zombie",0);p:=a.cmd.Process.Pid;tcZombie(t,p)
+    n,e:=tcNative(p);if e!=nil{t.Fatal(e)};_,ge:=syscall.Getpgid(p)
+    zombieExists:=syscall.Kill(p,0)==nil
+    var old syscall.Rlimit;if e=syscall.Getrlimit(syscall.RLIMIT_NOFILE,&old);e!=nil{t.Fatal(e)}
+    low:=old;low.Cur=0;if e=syscall.Setrlimit(syscall.RLIMIT_NOFILE,&low);e!=nil{t.Fatal(e)}
+    under,ue:=tcNative(p);if e=syscall.Setrlimit(syscall.RLIMIT_NOFILE,&old);e!=nil{t.Fatal(e)}
+    a.reap(t);empty,ee:=tcNative(p)
+    tcEmit(map[string]any{"zombieVisible":n>0 && zombieExists,"zombieGetpgidESRCH":ge==syscall.ESRCH,"underFaultVisible":ue==nil&&under>0,"reapedEmpty":ee==nil&&empty==0})
+}
+func tcOuter(t *testing.T,name string) {
+    t.Helper();ctx,cancel:=context.WithTimeout(context.Background(),30*time.Second);defer cancel()
+    c:=exec.CommandContext(ctx,os.Args[0],"-test.run=^"+name+"$","-test.timeout=25s")
+    c.Env=append(os.Environ(),"TC_HELPER="+name,"TC_ROOT="+t.TempDir())
+    b,e:=c.CombinedOutput();if e!=nil{t.Fatalf("helper failure: %v\n%s",e,b)}
+    found:=0;for _,line:=range strings.Split(string(b),"\n"){if strings.HasPrefix(line,"TCOBS "){found++;fmt.Println(line)}}
+    if found!=1{t.Fatalf("helper emitted %d payloads\n%s",found,b)}
+}
+func tcFault(t *testing.T) func() {
+    t.Helper();var old syscall.Rlimit;if e:=syscall.Getrlimit(syscall.RLIMIT_NOFILE,&old);e!=nil{t.Fatal(e)}
+    low:=old;if low.Max>128{low.Max=128};low.Cur=low.Max
+    if e:=syscall.Setrlimit(syscall.RLIMIT_NOFILE,&low);e!=nil{t.Fatal(e)}
+    files:=[]*os.File{};for {f,e:=os.Open("/dev/null");if e!=nil{if !errors.Is(e,syscall.EMFILE){t.Fatal(e)};break};files=append(files,f)}
+    if len(files)==0{t.Fatal("no owned descriptors exhausted")}
+    // Command completion closes its pipes. Keep the owned fault persistent even
+    // after those holes appear. Only this disposable child loses its hard limit;
+    // the shell and actors were started before either limit change.
+    zero:=syscall.Rlimit{};if e:=syscall.Setrlimit(syscall.RLIMIT_NOFILE,&zero);e!=nil{t.Fatal(e)}
+    if _,e:=exec.Command("/bin/ps","-axo","pid=,pgid=").Output();e==nil{t.Fatal("ps unexpectedly spawned under fd fault")}
+    return func(){for _,f:=range files{f.Close()}}
+}
+func tcError(e error) string {
+    if e==nil{return ""};var i *sys.Interrupted;if errors.As(e,&i){return "interrupted "+i.Signal}
+    if errors.Is(e,context.Canceled){return "context.Canceled"};if errors.Is(e,context.DeadlineExceeded){return "context.DeadlineExceeded"};return e.Error()
+}
+type tcRequester struct { count int; command string }
+func (r *tcRequester) Request(_ context.Context,q loop.Request)(*provider.Response,[]any,error) {
+    r.count++;if r.count==1{return &provider.Response{Items:[]map[string]any{
+        call("c1","shell",map[string]any{"command":r.command}),call("later","write_file",map[string]any{"path":"later","content":"wrong"})}},q.Input,nil}
+    return &provider.Response{Items:[]map[string]any{call("end","finish",map[string]any{})}},q.Input,nil
+}
+func TestTimeoutCustodyAcceptance(t *testing.T) {
+    if os.Getenv("TC_HELPER")!="TestTimeoutCustodyAcceptance" {tcOuter(t,"TestTimeoutCustodyAcceptance");return}
+    var c tcConfig;if e:=json.Unmarshal([]byte(os.Getenv("TC_CONFIG")),&c);e!=nil{t.Fatal(e)}
+    root:=os.Getenv("TC_ROOT");ready:=tcPipe(t,root,"ready");term:=tcPipe(t,root,"term")
+    s:=sys.NewWith(os.Environ(),root)
+    ctx,cancel:=context.WithCancel(context.Background());defer cancel()
+    if c.Mode=="deadline" {var stop context.CancelFunc;ctx,stop=context.WithTimeout(ctx,3*time.Second);defer stop()}
+    t.Cleanup(func(){cancel();s.Interrupt("SIGTERM");sys.Terminate(s.Groups())})
+    watchdog:=time.AfterFunc(20*time.Second,func(){for _,g:=range s.Groups(){syscall.Kill(-g,syscall.SIGKILL)};os.Exit(7)})
+    defer watchdog.Stop()
+    timeout:=time.Second;if c.Mode=="default"{timeout=0}
+    tool:=&tools.Tools{Root:root,Session:s,Enabled:[]string{"shell","write_file"},ShellTimeout:timeout}
+    command:=`trap 'printf "term\n" > term; exit 0' TERM; printf 'partial\n'; printf 'ready\n' > ready; sleep 60 & wait`
+    rq:=&tcRequester{command:command};text:="";published:=0
+    type outcome struct {r loop.Result; sr sys.Result; err error}
+    done:=make(chan outcome,1)
+    go func(){
+        if c.Mode=="direct" {r,e:=s.Run(command,root,sys.Options{Timeout:timeout});done<-outcome{sr:r,err:e};return}
+        rr:=&tcNormalRequester{inner:rq,normal:c.Mode=="normal"}
+        d,_:=tool.Definition("shell")
+        r,e:=loop.Run(ctx,loop.Round{Tools:tool,Definitions:[]any{d}},nil,rr,loop.Hooks{AfterCall:func(_ context.Context,_ tools.Call,o tools.Output,terminal bool,_ []any)error{if !terminal{published++;text=o.Text};return nil}})
+        done<-outcome{r:r,err:e}
+    }()
+    tcAwait(t,ready,"ready")
+    groups:=s.Groups();if len(groups)!=1{t.Fatalf("owned groups %v",groups)};g:=groups[0]
+    var actor *tcActor
+    if c.Actor!="none"{actor=tcStartActor(t,c.Actor,g);if c.Actor=="zombie"{tcZombie(t,actor.cmd.Process.Pid)}}
+    if c.Fault{release:=tcFault(t);defer release()}
+    held:=false;escaped:=false
+    stopAt:=time.Now()
+    if c.Mode!="default"{tcAwait(t,term,"term");stopAt=time.Now()}
+    if c.Actor=="zombie" {
+        select {case got:=<-done:t.Fatalf("returned before unreaped owned zombie release: %+v",got);case <-time.After(100*time.Millisecond):held=true}
+    }
+    switch c.Mode {case "cancel","default":stopAt=time.Now();cancel();case "deadline":<-ctx.Done();stopAt=time.Now();case "interrupt":stopAt=time.Now();s.Interrupt("SIGINT");cancel()}
+    if c.Actor=="move" {
+        fmt.Fprintln(actor.input,"move");tcAwait(t,actor.lines,"moved")
+        ag,e:=syscall.Getpgid(actor.cmd.Process.Pid);escaped=e==nil&&ag!=g&&syscall.Kill(actor.cmd.Process.Pid,0)==nil
+        if !escaped{t.Fatal("actor did not leave owned group alive")};stopAt=time.Now()
+    }
+    if c.Actor=="zombie" && c.Mode=="direct"{actor.reap(t);stopAt=time.Now()}
+    var got outcome
+    select {case got=<-done:case <-time.After(1500*time.Millisecond):t.Fatal("custody wait ignored stop/native observation while fault remained held")}
+    prompt:=time.Since(stopAt)<1500*time.Millisecond
+    faultHeld:=false
+    if c.Fault{f,e:=os.Open("/dev/null");if e==nil{f.Close()};faultHeld=errors.Is(e,syscall.EMFILE)}
+    // Reap ONLY the actor deliberately held by this harness, after Run returns.
+    if actor!=nil && !actor.waited{if c.Actor=="move"{actor.input.Close()};actor.reap(t)}
+    leaderGone:=pidGone(g);actorGone:=true;if actor!=nil{actorGone=pidGone(actor.cmd.Process.Pid)}
+    timedOut:=strings.HasPrefix(text,"timed out after ")
+    if c.Mode=="direct"{text=got.sr.Output;timedOut=got.sr.TimedOut}
+    _,laterErr:=os.Stat(filepath.Join(root,"later"))
+    if laterErr!=nil && !os.IsNotExist(laterErr){t.Fatalf("later-effect observation failed: %v",laterErr)}
+    later:=laterErr==nil
+    tcEmit(map[string]any{"error":tcError(got.err),"timedOut":timedOut,"text":text,"published":published,"requests":rq.count,"ending":string(got.r.Ending),"laterEffect":later,"returnedInput":got.r.Input!=nil,"faultHeld":faultHeld,"leaderGone":leaderGone,"actorGone":actorGone,"prompt":prompt,"held":held,"escaped":escaped})
+}
+type tcNormalRequester struct {inner *tcRequester;normal bool}
+func (r *tcNormalRequester) Request(ctx context.Context,q loop.Request)(*provider.Response,[]any,error) {
+    p,in,e:=r.inner.Request(ctx,q);if r.normal && r.inner.count==1{p.Items=p.Items[:1]}
+    if r.normal && r.inner.count==2 {
+        outputs:=[]any{};for _,x:=range q.Input{if m,ok:=x.(map[string]any);ok&&m["type"]=="function_call_output"{outputs=append(outputs,m)}}
+        b,_:=json.Marshal(outputs);want,_:=json.Marshal([]any{map[string]any{"type":"function_call_output","call_id":"c1","output":"timed out after 1s\nexit status: 0\npartial\n"}})
+        if string(b)!=string(want){return nil,nil,fmt.Errorf("incorrect timeout replay: %s",b)}
+    }
+    return p,in,e
+}
