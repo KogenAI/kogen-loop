@@ -318,6 +318,14 @@ Typed `sys.Error{Class, Reason, Detail, Exit}`. Provider errors keep their exist
 ## 6. Versioning and compatibility
 
 - **Additive changes in v1** (new optional task field with a safe default, new event type or field, new capability) need a contract note in this file and a conformance fixture. Callers ignore unknowns.
+- Native Anthropic Messages terminal `invalid_response` attempts optionally carry
+  `provider_failure` in the attempt record and typed error. Its string-enum
+  `anthropic_invalid` category may have one of `error_type`, `stop_reason`,
+  `block_type`, or `delta_type`; unrecognized or ill-typed values are `unknown`.
+  These allowlisted values contain no provider messages or payloads. A null
+  `ttft_ms` does not prove no first token, and unknown `usage_state` does not
+  prove no processing. A false failed end-turn/tool-use marker does not identify
+  the cause. Diagnostics do not change retry or validity decisions.
 - **Breaking changes** (removed or renamed field, changed meaning, changed engine order, changed default behavior) need `kogen-loop/v2` and `loop/v2`, and consumers must migrate deliberately.
 The external reference described a Kogen-owned synchronized copy at
 `cli/third_party/kogen-loop/`, a `replace` directive, sync script and

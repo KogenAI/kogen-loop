@@ -1,0 +1,221 @@
+package conformance
+
+// Native offline acceptance collector; synthetic streams are not provider recordings.
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"kogen-loop/api"
+	"kogen-loop/loop"
+	"kogen-loop/provider"
+	"kogen-loop/sys"
+	"kogen-loop/tools"
+)
+
+type adSpec struct {
+	Name, Facade, Stream, Provider string
+	Statuses                       []int
+	Single                         bool
+	Cut, Exhaust, Interrupt        bool
+}
+type adWire struct {
+	Method, Path, Body string
+	Header             http.Header
+}
+type adObservation struct {
+	Name, Facade              string
+	Records                   []map[string]any
+	Error                     any
+	Rendered, First, Delivery string
+	Events                    []map[string]any
+	Stderr                    string
+	Exit                      int
+	Response                  *provider.Response
+	Wire                      []adWire
+	Sleeps                    []int64
+	Hooks                     int
+	Files                     []string
+}
+
+func adJSON(v any) []byte {
+	b, e := json.Marshal(v)
+	if e != nil {
+		panic(e)
+	}
+	return b
+}
+func adRun(t *testing.T, spec adSpec) adObservation {
+	t.Helper()
+	w := streamWorld(t, true)
+	o := adObservation{Name: spec.Name, Facade: spec.Facade, Records: []map[string]any{}, Events: []map[string]any{}, Wire: []adWire{}, Sleeps: []int64{}, Files: []string{}}
+	role := provider.Role{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}
+	route := "/v1/messages"
+	if spec.Provider != "" {
+		role.Provider = spec.Provider
+		role.Model = "fixture-model"
+		role.Effort = "medium"
+		if role.Provider == "opencode-go" || role.Provider == "openai-compatible" {
+			route = "/v1/chat/completions"
+			if role.Provider == "opencode-go" {
+				route = "/inference/go/openai/v1/chat/completions"
+			}
+		} else {
+			route = "/v1/responses"
+		}
+		var c any = map[string]any{"provider": role.Provider, "api_key": "SYNTHETIC_API_KEY_0001"}
+		if role.Provider == "chatgpt" || role.Provider == "supergrok" {
+			c = map[string]any{"client_id": "oaiapp_fixture", "referrer": "kogen", "access_token": "synthetic-access", "refresh_token": "synthetic-refresh", "expires_at": time.Now().Unix() + 3600, "scope": "api:access"}
+		}
+		if e := os.WriteFile(filepath.Join(w.home, ".kogen", "credentials", role.Provider+".json"), adJSON(c), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	ss := sys.NewWith(w.env(nil), w.root)
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		body, e := io.ReadAll(r.Body)
+		if e != nil {
+			t.Error(e)
+		}
+		mu.Lock()
+		i := len(o.Wire)
+		o.Wire = append(o.Wire, adWire{r.Method, r.URL.Path, string(body), r.Header.Clone()})
+		mu.Unlock()
+		if r.Method != "POST" || r.URL.Path != route || i >= 3 {
+			t.Error("wrong/exhausted loopback route")
+			rw.WriteHeader(400)
+			return
+		}
+		rw.Header().Set("Request-Id", "req_anthropic_fixture")
+		if spec.Interrupt {
+			ss.Interrupt("SIGTERM")
+			return
+		}
+		status := 200
+		if i < len(spec.Statuses) {
+			status = spec.Statuses[i]
+		}
+		if status != 200 {
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(status)
+			io.WriteString(rw, `{"error":{"type":"overloaded_error","message":"AD_SECRET_MESSAGE_73"}}`)
+			return
+		}
+		rw.Header().Set("Content-Type", "text/event-stream")
+		bodyText := spec.Stream
+		if spec.Cut && !spec.Exhaust && i == 2 {
+			bodyText = ""
+			for _, e := range streamMessages("end_turn", false, true).Events {
+				bodyText += "event: " + fmt.Sprint(e["type"]) + "\ndata: " + string(adJSON(e)) + "\n\n"
+			}
+		}
+		io.WriteString(rw, bodyText)
+	}))
+	t.Cleanup(srv.Close)
+	env := append(w.env(nil), "KOGEN_PROVIDER_URL="+srv.URL, "KOGEN_AUTH_URL="+srv.URL)
+	ss = sys.NewWith(env, w.root)
+	if role.Provider == "openai-compatible" {
+		role.BaseURL = srv.URL + "/v1"
+	}
+	client := provider.NewClient("kogen dev+12345678 (test)")
+	now := time.Now()
+	client.Now = func() time.Time { return now }
+	client.Sleep = func(ctx context.Context, d time.Duration) error {
+		o.Sleeps = append(o.Sleeps, int64(d/time.Second))
+		now = now.Add(d)
+		return ctx.Err()
+	}
+	obs := &recorder{}
+	input := []any{userMessage("AD_SECRET_PROMPT_84")}
+	defs := tools.AsAny(tools.Defs("write_file"), nil)
+	var err error
+	switch spec.Facade {
+	case "Provider":
+		o.Response, err = client.Respond(context.Background(), ss, provider.Request{Role: role, Instructions: "policy", Input: input, Tools: defs, CacheID: "ad-cache", Single: spec.Single}, obs)
+		o.Records = obs.records
+	case "Direct":
+		rd := roundWith(t, w)
+		rd.Role = role
+		rd.Instructions = "policy"
+		rd.Definitions = defs
+		rd.Tools.Session = ss
+		d := &loop.Direct{Client: client, Session: ss, CacheID: "ad-cache", Observer: obs}
+		res, e := loop.Run(context.Background(), rd, input, d, loop.Hooks{BeforeCall: func(context.Context, tools.Call, []any) error { o.Hooks++; return nil }})
+		err = e
+		o.Response = res.Response
+		o.Records = obs.records
+	case "Session":
+		s, e := loop.NewSession(loop.SessionConfig{Root: w.root, Role: role, Instructions: "policy", Enabled: []string{"write_file"}, Client: client, Session: ss, Emit: func(e api.Event) { var m map[string]any; json.Unmarshal(adJSON(e), &m); o.Events = append(o.Events, m) }})
+		if e != nil {
+			t.Fatal(e)
+		}
+		res, e := s.Round(context.Background(), "AD_SECRET_PROMPT_84")
+		err = e
+		o.Response = res.Response
+	case "CLI":
+		task := w.task(map[string]any{"role": map[string]any{"provider": "anthropic", "model": role.Model, "effort": role.Effort, "base_url": ""}, "instructions": "policy", "prompt": "AD_SECRET_PROMPT_84", "tools": []any{"write_file"}})
+		r := streamCLI(t, w, &streamFake{srv: srv}, task)
+		o.Events = r.events
+		o.Exit = r.exit
+		o.Stderr = r.stderr
+	default:
+		t.Fatal("unknown facade")
+	}
+	for _, e := range o.Events {
+		if e["type"] == "request.attempt" {
+			r, ok := e["record"].(map[string]any)
+			if !ok {
+				t.Fatal("record must be object")
+			}
+			o.Records = append(o.Records, r)
+		}
+	}
+	if spec.Facade == "CLI" {
+		o.Delivery = "not_observed"
+	} else if err != nil {
+		o.First = err.Error()
+		o.Delivery = tools.DeliveryStatus(err)
+		if se, ok := sys.AsError(err); ok {
+			o.Error = se
+			o.Rendered = se.Render()
+			o.Exit = se.Exit
+		} else {
+			o.Error = map[string]any{"kind": fmt.Sprintf("%T", err), "text": err.Error()}
+		}
+	} else {
+		o.Delivery = tools.DeliveryStatus(nil)
+	}
+	files, e := os.ReadDir(w.root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, f := range files {
+		o.Files = append(o.Files, f.Name())
+	}
+	return o
+}
+func TestADCollector(t *testing.T) {
+	var specs []adSpec
+	if e := json.Unmarshal([]byte(os.Getenv("AD_SPECS")), &specs); e != nil || len(specs) == 0 {
+		t.Fatal("AD_SPECS must be nonempty JSON", e)
+	}
+	for _, s := range specs {
+		t.Run(s.Name+"_"+s.Facade, func(t *testing.T) { o := adRun(t, s); fmt.Println("ADOBS " + string(adJSON(o))) })
+	}
+}
+func TestADReplay(t *testing.T) {
+	for _, facade := range []string{"Direct", "Session", "CLI"} {
+		for _, reason := range []string{"end_turn", "tool_use", "invalid_later"} {
+			t.Run(facade+"_"+reason, func(t *testing.T) { runStreamAnthropic(t, facade, reason) })
+		}
+	}
+}
