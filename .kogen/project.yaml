@@ -18,11 +18,14 @@ commands:
 protect: []          # check configuration the Build must not change, e.g. .credo.exs
 models:
   shape:
+    provider: chatgpt
     model: gpt-6.1-sol
-    effort: high
+    effort: low
   build:
-    model: gpt-6.1-sol
-    effort: medium
-  review:
-    model: gpt-6.1-sol
+    provider: chatgpt
+    model: gpt-6.1-terra
     effort: high
+  review:
+    provider: chatgpt
+    model: gpt-6.1-terra
+    effort: medium
