@@ -1,0 +1,188 @@
+package conformance
+
+// Independent acceptance collector injected by Go's overlay. Kept as text so
+// ordinary module tests do not register this protected collector as product code.
+import (
+    "bufio"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "os"
+    "path/filepath"
+    "reflect"
+    "strings"
+    "syscall"
+    "testing"
+    "time"
+
+    "kogen-loop/loop"
+    "kogen-loop/provider"
+    "kogen-loop/sys"
+    "kogen-loop/tools"
+)
+
+type csConfig struct { Case, Mode, Bound, Hold string }
+func csDuration(t *testing.T, text string) time.Duration {
+    t.Helper(); d, err := time.ParseDuration(text); if err != nil { t.Fatal(err) }; return d
+}
+func csSet(t *testing.T, tool *tools.Tools, d time.Duration) {
+    t.Helper(); f := reflect.ValueOf(tool).Elem().FieldByName("ShellTimeout")
+    if !f.IsValid() || !f.CanSet() || f.Type() != reflect.TypeOf(d) { t.Fatal("missing caller-owned tools.Tools.ShellTimeout time.Duration") }
+    f.SetInt(int64(d))
+}
+func csDef(t *testing.T, tool *tools.Tools, name string) map[string]any {
+    t.Helper(); d, ok := any(tool).(interface { Definition(string) (map[string]any, bool) })
+    if !ok { t.Fatal("missing configuration-aware (*tools.Tools).Definition") }
+    out, found := d.Definition(name); if !found { t.Fatalf("no definition for %s", name) }; return out
+}
+func csJSON(x any) string { b, _ := json.Marshal(x); return string(b) }
+func csError(err error) string {
+    if err == nil { return "" }; var in *sys.Interrupted
+    if errors.As(err, &in) { return "interrupted " + in.Signal }
+    if errors.Is(err, context.Canceled) { return "context.Canceled" }
+    if errors.Is(err, context.DeadlineExceeded) { return "context.DeadlineExceeded" }
+    return err.Error()
+}
+func csOutputs(input []any) []any {
+    out := []any{}; for _, x := range input { m, ok := x.(map[string]any); if ok && m["type"] == "function_call_output" { out = append(out, m) } }; return out
+}
+func csGone(pid int) bool { return syscall.Kill(pid, 0) == syscall.ESRCH }
+func csAllGone(pids []int) bool { for _, p := range pids { if !csGone(p) { return false } }; return true }
+
+type csPipe struct { f *os.File; lines chan string; errs chan error }
+func csFIFO(t *testing.T, root, name string) *csPipe {
+    t.Helper(); path := filepath.Join(root, name)
+    if err := syscall.Mkfifo(path, 0600); err != nil { t.Fatal(err) }
+    f, err := os.OpenFile(path, os.O_RDWR, 0600); if err != nil { t.Fatal(err) }
+    p := &csPipe{f: f, lines: make(chan string, 4), errs: make(chan error, 1)}
+    t.Cleanup(func() { f.Close() })
+    go func() { s := bufio.NewScanner(f); for s.Scan() { p.lines <- s.Text() }; p.errs <- s.Err() }()
+    return p
+}
+func (p *csPipe) wait(t *testing.T, text string) {
+    t.Helper(); select {
+    case got := <-p.lines: if got != text { t.Fatalf("fixture event %q, want %q", got, text) }
+    case err := <-p.errs: t.Fatalf("fixture event stream ended: %v", err)
+    case <-time.After(15*time.Second): t.Fatalf("fixture never emitted %s", text)
+    }
+}
+func csFacts(pids []int) map[string]any {
+    return map[string]any{"leaderGone": csGone(pids[0]), "childGone": csGone(pids[1]), "grandchildGone": csGone(pids[2]), "sameGroup": true}
+}
+func csLifecycle(t *testing.T, c csConfig) map[string]any {
+    t.Helper(); w := newWorld(t); rd := roundWith(t, w); s := rd.Tools.Session
+    ctx, cancel := context.WithCancel(context.Background()); defer cancel()
+    ready := csFIFO(t, w.root, "ready"); term := csFIFO(t, w.root, "term")
+    // Register custody before any subprocess can start. Cleanup also runs after
+    // readiness/setup assertions fail, cancels outstanding work and checks real PIDs.
+    t.Cleanup(func() { cancel(); s.Interrupt("SIGTERM"); sys.Terminate(s.Groups()) })
+    prefix := `trap 'printf "term\n" > term; exit 0' TERM; `
+    if c.Mode == "leader-ignores" { prefix = `trap '' TERM; ` }
+    command := prefix + `echo $$ > pid-sh; printf 'partial\n'; sh -c 'trap "" TERM; echo $$ > pid-child; sleep 600 & echo $! > pid-grand; printf "ready\n" > ready; wait' & wait`
+    ref := c.Case == "fixture" || c.Case == "fixture-live"
+    if !ref { csSet(t, rd.Tools, csDuration(t, c.Bound)); rd.Definitions = tools.AsAny([]map[string]any{csDef(t, rd.Tools, "shell")}) }
+    rq := &scripted{responses: []*provider.Response{respond("r1", fakeCall("c1", "shell", csJSON(map[string]any{"command":command}))), respond("r2", fakeCall("end", "finish", `{}`))}}
+    if c.Case == "cancel" { rq.responses[0].Items = append(rq.responses[0].Items, fakeCall("later", "write_file", `{"path":"later","content":"wrong"}`)) }
+    type result struct { res loop.Result; out tools.Output; err error }
+    done := make(chan result, 1); pids := []int{}; published := 0; goneAtPublish := true; text := ""
+    go func() {
+        if ref { _, err := s.Run(command, w.root, sys.Options{Timeout: csDuration(t, c.Bound)}); done <- result{err:err}; return }
+        if c.Case == "direct" { out, err := rd.Tools.Run("shell", map[string]any{"command":command}); done <- result{out:out, err:err}; return }
+        res, err := loop.Run(ctx, rd, nil, rq, loop.Hooks{AfterCall:func(_ context.Context, _ tools.Call, out tools.Output, terminal bool, _ []any) error {
+            if !terminal { published++; text = out.Text; goneAtPublish = goneAtPublish && csAllGone(pids) }; return nil
+        }})
+        done <- result{res:res, err:err}
+    }()
+    ready.wait(t, "ready")
+    pids = []int{readPid(t, filepath.Join(w.root,"pid-sh")), readPid(t, filepath.Join(w.root,"pid-child")), readPid(t, filepath.Join(w.root,"pid-grand"))}
+    t.Cleanup(func() { sys.Terminate(s.Groups()); for _, p := range pids { if !pidGone(p) { syscall.Kill(p, syscall.SIGKILL); t.Errorf("fixture cleanup left process %d", p) } } })
+    groups := s.Groups(); if len(groups) != 1 { t.Fatalf("fixture groups %v", groups) }
+    for _, pid := range pids { g, err := syscall.Getpgid(pid); if err != nil || g != groups[0] { t.Fatalf("fixture process %d group %d, error %v, expected %d",pid,g,err,groups[0]) } }
+    if c.Case == "fixture-live" {
+        facts := csFacts(pids); facts["ready"] = true
+        s.Interrupt("SIGTERM"); select { case <-done: case <-time.After(20*time.Second): t.Fatal("reference fixture did not stop") }; return facts
+    }
+    if c.Case == "cancel" {
+        if strings.HasSuffix(c.Mode, "cleanup") { term.wait(t, "term") }
+        if strings.HasPrefix(c.Mode, "interrupt") { s.Interrupt("SIGTERM") } else { cancel() }
+    }
+    var r result
+    select { case r = <-done: case <-time.After(20*time.Second): t.Fatal("owned call failed to return") }
+    if c.Case == "fixture" {
+        // Known-good reference only: explicit joined custody after existing sys.Run.
+        // This does not implement or claim the missing Tools option.
+        sys.Terminate(s.Groups()); for _, p := range pids { if !pidGone(p) { t.Fatalf("reference custody failed for %d", p) } }
+        facts := csFacts(pids); facts["ready"] = true; return facts
+    }
+    facts := csFacts(pids); facts["error"] = csError(r.err)
+    if c.Case == "cancel" {
+        // Existing cancellation custody may return before killed zombies are reaped.
+        // Use the harness's bounded poll only here; timeout return/publication facts
+        // above and below must remain immediate, with no observer-side teardown.
+        facts["leaderGone"] = pidGone(pids[0])
+        facts["childGone"] = pidGone(pids[1])
+        facts["grandchildGone"] = pidGone(pids[2])
+    }
+    if c.Case == "direct" { facts["text"] = r.out.Text; return facts }
+    facts["text"] = text; facts["goneAtPublish"] = goneAtPublish; facts["published"] = published
+    facts["requests"] = len(rq.asked); facts["ending"] = string(r.res.Ending)
+    next := []any{}; stable := true
+    if len(rq.asked) > 1 { next = csOutputs(rq.asked[1].Input); stable = csJSON(rq.asked[0].Tools) == csJSON(rq.asked[1].Tools) }
+    facts["nextOutputs"] = next; facts["definitionsStable"] = stable
+    if c.Case == "cancel" { _, err := os.Stat(filepath.Join(w.root,"later")); facts["laterEffect"] = !errors.Is(err, os.ErrNotExist); facts["returnedInput"] = r.res.Input != nil }
+    return facts
+}
+
+type csDelayed struct { inner *scripted; wait time.Duration; actual time.Duration }
+func (r *csDelayed) Request(ctx context.Context, req loop.Request) (*provider.Response, []any, error) {
+    if len(r.inner.asked) == 0 { start := time.Now(); select { case <-time.After(r.wait): case <-ctx.Done(): return nil,nil,ctx.Err() }; r.actual = time.Since(start) }
+    return r.inner.Request(ctx,req)
+}
+func csSimple(t *testing.T, c csConfig) map[string]any {
+    t.Helper(); w := newWorld(t); rd := roundWith(t,w); bound := csDuration(t,c.Bound)
+    legacyDef, _ := tools.Definition("shell"); legacyBytes := csJSON(legacyDef)
+    csSet(t,rd.Tools,bound)
+    if c.Case == "definitions" {
+        zero := &tools.Tools{}; csSet(t,zero,0); z := csDef(t,zero,"shell")
+        d := csDef(t,rd.Tools,"shell"); before := csJSON(d); again := csDef(t,rd.Tools,"shell")
+        csSet(t,rd.Tools,2*time.Second); second := csDef(t,rd.Tools,"shell")
+        other := true; for _, name := range []string{"read_file","write_file","list_files","search_text","view_image","documentation"} { original,_ := tools.Definition(name); other = other && csJSON(original) == csJSON(csDef(t,rd.Tools,name)) }
+        parameters := d["parameters"].(map[string]any); originalParameters := legacyDef["parameters"]
+        currentDefault,_ := tools.Definition("shell")
+        return map[string]any{"defaultBytesEqual":csJSON(currentDefault)==legacyBytes,"zeroBytesEqual":csJSON(z)==legacyBytes,"otherToolsUnchanged":other,
+            "commandOnly":csJSON(parameters)==csJSON(originalParameters),"stable":csJSON(again)==before,"previousUnchanged":csJSON(d)==before,
+            "description":d["description"],"secondDescription":second["description"]}
+    }
+    def := csDef(t,rd.Tools,"shell"); rd.Definitions = tools.AsAny([]map[string]any{def})
+    if c.Case == "zero" {
+        command := "printf 'out\\n'; printf 'err\\n' >&2; exit 7"
+        old := &tools.Tools{Root:w.root, Session:sys.NewWith(w.env(nil),w.root), Enabled:[]string{"shell"}}
+        outOld, errOld := old.Run("shell",map[string]any{"command":command}); outZero,errZero := rd.Tools.Run("shell",map[string]any{"command":command})
+        responses := []*provider.Response{respond("r1",fakeCall("c1","shell",csJSON(map[string]any{"command":command}))),respond("r2",fakeCall("end","finish",`{}`))}
+        rq := &scripted{responses:responses}; res,err := loop.Run(context.Background(),rd,nil,rq,loop.Hooks{})
+        oldRd := rd; oldRd.Tools = old; oldRd.Definitions = tools.AsAny(tools.Defs("shell")); oldRq := &scripted{responses:responses}
+        oldRes,oldErr := loop.Run(context.Background(),oldRd,nil,oldRq,loop.Hooks{})
+        return map[string]any{"legacy":outOld.Text,"zero":outZero.Text,"error":csError(errors.Join(errOld,errZero,err,oldErr)),
+            "replayBytesEqual":csJSON(oldRes.Input)==csJSON(res.Input) && csJSON(oldRq.asked)==csJSON(rq.asked),"requests":len(rq.asked),"ending":string(res.Ending),"defaultDefinitionBytesEqual":csJSON(def)==legacyBytes}
+    }
+    hold := csDuration(t,c.Hold)
+    command := fmt.Sprintf("sleep %.3f; printf ok",hold.Seconds())
+    rq := &scripted{responses:[]*provider.Response{respond("r1",fakeCall("c1","shell",csJSON(map[string]any{"command":command})),fakeCall("c2","shell",csJSON(map[string]any{"command":command}))),respond("r2",fakeCall("end","finish",`{}`))}}
+    delayed := &csDelayed{inner:rq,wait:bound+hold}; outputs := []string{}; var first time.Time; var aggregate time.Duration
+    startCall := loop.Hooks{BeforeCall:func(_ context.Context,call tools.Call,_ []any) error { if call.Name=="shell" && first.IsZero() { first=time.Now() }; return nil },
+        AfterCall:func(_ context.Context,_ tools.Call,out tools.Output,terminal bool,_ []any) error { if !terminal { outputs=append(outputs,out.Text); aggregate=time.Since(first) }; return nil }}
+    res,err := loop.Run(context.Background(),rd,nil,delayed,startCall)
+    stable := len(rq.asked)==2 && csJSON(rq.asked[0].Tools)==csJSON(rq.asked[1].Tools)
+    return map[string]any{"error":csError(err),"ending":string(res.Ending),"requests":len(rq.asked),"published":len(outputs),"outputs":outputs,"aggregateExceedsBound":aggregate>bound,"providerWaitExceedsBound":delayed.actual>bound,"definitionsStable":stable}
+}
+func TestCallerShellBoundAcceptance(t *testing.T) {
+    var c csConfig; if err := json.Unmarshal([]byte(os.Getenv("CS_BOUND_CASE")),&c); err != nil { t.Fatal(err) }
+    var result map[string]any
+    switch c.Case {
+    case "fixture","fixture-live","direct","timeout","cancel": result=csLifecycle(t,c)
+    case "zero","definitions","per-call": result=csSimple(t,c)
+    default: t.Fatalf("unknown acceptance case %q",c.Case)
+    }
+    fmt.Println("CSOBS "+csJSON(result))
+}

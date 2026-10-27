@@ -145,7 +145,7 @@ func (s *Session) WatchSignals() (stop func()) {
 // Options are a command's optional settings.
 type Options struct {
 	Env     map[string]string // added to the caller's environment
-	Timeout time.Duration     // 0: no limit
+	Timeout time.Duration     // nonpositive: no limit
 	// FinishOnInterrupt waits for the command to end after an interrupt (git commit), so
 	// Kogen sees what it left behind (CLI-7).
 	FinishOnInterrupt bool
@@ -160,7 +160,9 @@ type Result struct {
 }
 
 // Run runs `/bin/sh -c command` in dir. It returns *Interrupted when the caller
-// interrupts; nothing starts after an interrupt.
+// interrupts; nothing starts after an interrupt. A fired positive Timeout waits
+// for whole-group termination and disappearance before returning timeout feedback;
+// an observed interrupt still takes precedence and keeps its existing custody.
 func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	s.Debug("command in " + dir + ": " + command)
 	cmd, release, err := supervised(command)
@@ -192,10 +194,24 @@ func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	s.groups[pgid] = true
 	s.mu.Unlock()
 
-	var timedOut atomic.Bool
+	var timer *time.Timer
+	timeoutDone := make(chan struct{})
+	timeoutPIDs := map[int]bool{}
 	if opts.Timeout > 0 {
-		t := time.AfterFunc(opts.Timeout, func() { timedOut.Store(true); Terminate([]int{pgid}) })
-		defer t.Stop()
+		timer = time.AfterFunc(opts.Timeout, func() {
+			// Darwin can stop reporting a killed group before its individual
+			// zombie PIDs disappear. Retain its members before sending signals.
+			// Observation failure must not postpone the timeout's signals (for
+			// example, ps cannot start while file descriptors are exhausted).
+			// The feedback path below still requires a successful observation.
+			members, _ := groupPIDs(pgid)
+			for _, pid := range members {
+				timeoutPIDs[pid] = true
+			}
+			Terminate([]int{pgid})
+			close(timeoutDone)
+		})
+		defer timer.Stop()
 	}
 	waited := make(chan struct{})
 	go func() { cmd.Wait(); close(waited) }()
@@ -207,10 +223,68 @@ func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 		}
 		return Result{}, s.Err()
 	}
+	// Stop winning means completion was ordinary. Otherwise the callback owns
+	// teardown: join it before publishing timeout feedback, even if the leader
+	// exited early and WaitDelay already closed inherited output descriptors.
+	timedOut := timer != nil && !timer.Stop()
+	if timedOut {
+		select {
+		case <-timeoutDone:
+		case <-s.done:
+			return Result{}, s.Err()
+		}
+		// Terminate sends SIGKILL but does not wait for disappearance. Keep this
+		// extra custody wait local to timeout feedback, never shared cancellation.
+		for {
+			members, observed := groupPIDs(pgid)
+			for _, pid := range members {
+				timeoutPIDs[pid] = true
+			}
+			alive := !observed || syscall.Kill(-pgid, 0) == nil
+			for pid := range timeoutPIDs {
+				if syscall.Kill(pid, 0) != syscall.ESRCH {
+					alive = true
+				} else {
+					delete(timeoutPIDs, pid)
+				}
+			}
+			if !alive {
+				break
+			}
+			select {
+			case <-s.done:
+				return Result{}, s.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
 	if err := s.Err(); err != nil {
 		return Result{}, err
 	}
-	return Result{Status: exitStatus(cmd.ProcessState), Output: buf.String(), TimedOut: timedOut.Load()}, nil
+	return Result{Status: exitStatus(cmd.ProcessState), Output: buf.String(), TimedOut: timedOut}, nil
+}
+
+// groupPIDs observes group members independently of kill(-pgid, 0), which
+// need not include unreaped processes on every supported host. A failed ps is
+// not evidence of disappearance; the timeout custody path retries observation.
+func groupPIDs(pgid int) ([]int, bool) {
+	output, err := exec.Command("/bin/ps", "-axo", "pid=,pgid=").Output()
+	if err != nil {
+		return nil, false
+	}
+	var pids []int
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		group, _ := strconv.Atoi(fields[1])
+		if group == pgid {
+			pid, _ := strconv.Atoi(fields[0])
+			pids = append(pids, pid)
+		}
+	}
+	return pids, true
 }
 
 // Groups lists the process groups started so far.

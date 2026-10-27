@@ -26,6 +26,8 @@ bin/kogen-loop run --task - < task.json
 
 The CLI supports private atomic transcript resume (`session_resume: "transcript"`), not Kogen checkpoints. Subagents and compaction are unsupported. The default context policy refuses over-budget requests rather than clipping them. Missing usage is null, not estimated. Tool text is bounded to 16384 UTF-8 bytes; intercepted host outputs remain host-owned. Cancellation and deadlines terminate shell process groups before returning.
 
+The Go tool layer offers an opt-in per-call `tools.Tools.ShellTimeout` (nonpositive is unbounded). Build shell definitions with that instance's `Definition` method and pass the same instance to `loop.Round.Tools`; see the [caller contract](docs/contract/loop-v1.md#caller-owned-shell-duration-go-tools-only). Timeout is tool feedback, unlike cancellation or the standalone whole-round `deadline_seconds`. This library-only option adds no CLI/task setting and is not adopted by Kogen here.
+
 ## Test
 
 Tests use recorded/fake providers and private test credentials, not paid model calls:

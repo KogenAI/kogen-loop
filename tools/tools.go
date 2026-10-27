@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -52,6 +53,8 @@ type Tools struct {
 	// Session runs shell commands (the caller's environment, interrupts) and gives Git its
 	// environment. Nil: this process's environment, no interrupts.
 	Session *sys.Session
+	// ShellTimeout bounds each shell invocation independently. Nonpositive means no limit.
+	ShellTimeout time.Duration
 	// Repo runs the Git commands of list_files and search_text and the candidate tree of
 	// view_image. Nil: Git in Root with the Session's environment (see git.go).
 	Repo Git
@@ -393,18 +396,22 @@ func (t *Tools) searchText(args map[string]any) string {
 	return gitFailure(res)
 }
 
-// shell runs the command with /bin/sh -c in the repository root, stdin closed, without a
-// time limit; the result is `exit status: <n>` and the combined output.
+// shell runs /bin/sh -c in the repository root with stdin closed and ShellTimeout.
+// Only an expired timeout prefixes the ordinary exit status and combined output.
 func (t *Tools) shell(args map[string]any) (string, error) {
 	command, msg := stringArg(args, "command")
 	if msg != "" {
 		return msg, nil
 	}
-	res, err := t.session().Run(command, t.Root, sys.Options{})
+	res, err := t.session().Run(command, t.Root, sys.Options{Timeout: t.ShellTimeout})
 	if err != nil {
 		return "", err
 	}
-	return "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output, nil
+	text := "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output
+	if res.TimedOut {
+		text = "timed out after " + t.ShellTimeout.String() + "\n" + text
+	}
+	return text, nil
 }
 
 func (t *Tools) probe(args map[string]any) (string, error) {
