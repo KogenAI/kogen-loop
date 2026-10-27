@@ -1,0 +1,90 @@
+package sys
+
+import (
+ "errors"
+ "fmt"
+ "io/fs"
+ "os"
+ "os/exec"
+ "sort"
+ "strconv"
+ "strings"
+ "syscall"
+ "testing"
+ "testing/fstest"
+ "time"
+)
+
+type ltoFS struct { data map[string]string; faults map[string]error; listing error }
+func (f ltoFS) Open(string)(fs.File,error){return nil,syscall.ENOSYS}
+func (f ltoFS) ReadDir(string)([]fs.DirEntry,error){
+ if f.listing!=nil{return nil,f.listing}
+ m:=fstest.MapFS{}
+ for n:=range f.data {m[n+"/stat"]=&fstest.MapFile{Data:[]byte(f.data[n])}}
+ for n:=range f.faults {m[n+"/stat"]=&fstest.MapFile{}}
+ return fs.ReadDir(m,".")
+}
+func (f ltoFS) ReadFile(n string)([]byte,error){
+ p:=strings.TrimSuffix(n,"/stat")
+ if e:=f.faults[p];e!=nil{return nil,&fs.PathError{Op:"read",Path:n,Err:e}}
+ if s,ok:=f.data[p];ok{return []byte(s),nil};return nil,fs.ErrNotExist
+}
+func ltoStat(g int)string{return fmt.Sprintf("123 (command (with spaces)) Z 1 %d 0 0",g)}
+func ltoGroup(t *testing.T,zombie bool)int{
+ t.Helper();script:="printf ready; read x";if zombie{script="exit 0"}
+ c:=exec.Command("/bin/sh","-c",script);c.SysProcAttr=&syscall.SysProcAttr{Setpgid:true}
+ in,e:=c.StdinPipe();if e!=nil{t.Fatal(e)}
+ out,e:=c.StdoutPipe();if e!=nil{t.Fatal(e)}
+ if e=c.Start();e!=nil{t.Fatal(e)}
+ t.Cleanup(func(){in.Close();c.Process.Kill();c.Wait();out.Close()})
+ if !zombie {ch:=make(chan string,1);go func(){b:=make([]byte,5);n,_:=out.Read(b);ch<-string(b[:n])}();select{case s:=<-ch:if s!="ready"{t.Fatal(s)};case <-time.After(3*time.Second):t.Fatal("owned group not ready")}}
+ if zombie {
+  deadline:=time.Now().Add(3*time.Second)
+  for {b,e:=exec.Command("/bin/ps","-o","stat=","-p",strconv.Itoa(c.Process.Pid)).Output();if e==nil&&strings.Contains(string(b),"Z"){break};if time.Now().After(deadline){t.Fatal("owned child did not become unreaped zombie")};time.Sleep(time.Millisecond)}
+ }
+ return c.Process.Pid
+}
+func TestLinuxTimeoutShape(t *testing.T){
+ // The gone group was actually allocated and reaped by this test; no guessed live PID.
+ c:=exec.Command("/bin/sh","-c","exit 0");c.SysProcAttr=&syscall.SysProcAttr{Setpgid:true};if e:=c.Run();e!=nil{t.Fatal(e)};gone:=c.Process.Pid
+ if e:=syscall.Kill(-gone,0);e!=syscall.ESRCH{t.Fatalf("owned reaped group witness: %v",e)}
+ check:=func(t *testing.T,g int,f ltoFS,want bool,errno error){t.Helper();a,e:=linuxTimeoutGroupAlive(g,f);if a!=want{t.Fatalf("alive=%v want=%v error=%v",a,want,e)};if errno==nil {if e!=nil{t.Fatal(e)}}else if !errors.Is(e,errno){t.Fatalf("error=%v want errors.Is(%v)",e,errno)}}
+ t.Run("live",func(t *testing.T){g:=ltoGroup(t,false);check(t,g,ltoFS{listing:syscall.EMFILE},true,nil)})
+ t.Run("zombie",func(t *testing.T){g:=ltoGroup(t,true);if e:=syscall.Kill(-g,0);e!=syscall.EPERM{t.Fatalf("Darwin zombie kill presence fixture expected EPERM, got %v",e)};check(t,g,ltoFS{listing:syscall.EMFILE},true,nil)})
+ t.Run("synthetic-zombie",func(t *testing.T){check(t,gone,ltoFS{data:map[string]string{"10":ltoStat(gone)}},true,nil)})
+ t.Run("vanished",func(t *testing.T){check(t,gone,ltoFS{data:map[string]string{"20":ltoStat(gone+1),"self":"malformed"},faults:map[string]error{"10":syscall.ENOENT,"11":syscall.ESRCH}},false,nil)})
+ t.Run("eperm",func(t *testing.T){check(t,gone,ltoFS{faults:map[string]error{"10":syscall.EPERM}},false,syscall.EPERM)})
+ t.Run("eacces",func(t *testing.T){check(t,gone,ltoFS{faults:map[string]error{"10":syscall.EACCES}},false,syscall.EACCES)})
+ t.Run("error-before-member",func(t *testing.T){check(t,gone,ltoFS{faults:map[string]error{"10":syscall.EPERM},data:map[string]string{"20":ltoStat(gone)}},true,nil)})
+ t.Run("malformed",func(t *testing.T){a,e:=linuxTimeoutGroupAlive(gone,ltoFS{data:map[string]string{"10":"broken"}});if a||e==nil{t.Fatalf("malformed proved absence: %v %v",a,e)}})
+ t.Run("listing",func(t *testing.T){check(t,gone,ltoFS{listing:syscall.EMFILE},false,syscall.EMFILE)})
+ for _,v:=range []struct{name string;g int}{{"guard-1",1},{"guard-0",0},{"guard-negative",-1}} {t.Run(v.name,func(t *testing.T){a,e:=linuxTimeoutGroupAlive(v.g,ltoFS{});if a||e==nil{t.Fatalf("invalid pgid %d: %v %v",v.g,a,e)}})}
+}
+
+// Test-only known-good control oracle. Production acceptance never calls this.
+// Controls replace only the new composition with a shim delegating here, then
+// independently mutate five decisions so deeper assertions cannot hide behind
+// an absent production function or a missing-feature compiler failure.
+func ltoReference(p int,f fs.FS)(bool,error){
+ if p<=1{return false,fmt.Errorf("invalid pgid")}
+ mutant:=os.Getenv("LTO_MUTANT")
+ e:=syscall.Kill(-p,0)
+ if e==nil{return true,nil}
+ if e==syscall.EPERM {if mutant=="epermFatal"{return false,e};return true,nil}
+ if e!=syscall.ESRCH{return false,e}
+ if mutant=="killAbsent"{return false,nil}
+ entries,e:=fs.ReadDir(f,".");if e!=nil{return false,e}
+ sort.Slice(entries,func(i,j int)bool{return entries[i].Name()<entries[j].Name()})
+ var remembered error
+ for _,entry:=range entries{
+  if _,e:=strconv.Atoi(entry.Name());e!=nil{continue}
+  b,e:=fs.ReadFile(f,entry.Name()+"/stat")
+  if errors.Is(e,syscall.ENOENT){continue}
+  if errors.Is(e,syscall.ESRCH){if mutant=="esrchFatal"{return false,e};continue}
+  if e!=nil {if mutant=="skipUnreadable"{continue};if mutant=="firstUnreadableAbsent"{return false,nil};remembered=e;continue}
+  end:=strings.LastIndexByte(string(b),')');if end<0{remembered=fmt.Errorf("invalid stat");continue}
+  fields:=strings.Fields(string(b[end+1:]));if len(fields)<3{remembered=fmt.Errorf("short stat");continue}
+  group,e:=strconv.Atoi(fields[2]);if e!=nil{remembered=e;continue};if group==p{return true,nil}
+ }
+ return false,remembered
+}

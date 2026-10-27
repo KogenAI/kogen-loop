@@ -178,9 +178,7 @@ execution and `FinishOnInterrupt` semantics are unchanged. Standalone
 option; there is no SessionConfig timeout.
 
 Observation is in-process: Darwin uses numeric KERN_PROC_PGRP actual data length
-(including zombies), and Linux enumerates current /proc membership including
-zombies using the standard library. Linux is cross-built, not host lifecycle-proven
-in this correction. Other platforms explicitly lack native observation support.
+(including zombies), and Linux follows this rule. Linux first uses `kill(-pgid, 0)` as a monotone presence witness: success or `EPERM` means the group is present, with no readable `/proc` needed, and `pgid <= 1` is rejected before any kill. `ESRCH` alone never proves absence: Linux then enumerates `/proc` (zombies, state Z, included) and reads the group after the final `)` of each `stat`. Entries that vanish (`ENOENT`/`ESRCH`) are skipped; unreadable entries (`EPERM`/`EACCES`) and malformed `stat` are remembered, and a later membership witness wins over them. Without a witness, any remembered error or listing failure is an observation failure; only `ESRCH` plus a complete error-free scan with no member is absent. A `hidepid=1`/noaccess mount makes final confirmation fail rather than report absence; with `hidepid=2` (invisible) a hidden live member still cannot become absent because kill is a presence witness. Status as of 27 October 2026: research had reproduced the `ESRCH` defect on Linux; this correction was source-qualified on Darwin and cross-built, with Linux runtime proof pending at delivery. A cross-build does not prove lifecycle behavior. Other platforms explicitly lack native observation support.
 A failed or unsupported observation returns `sys.Result{}` with an error matching
 `errors.Is(err, sys.ErrTimeoutObservation)` (`timeout custody observation failed`),
 including positive-timeout callers with no Context. Timeout signals are dispatched
