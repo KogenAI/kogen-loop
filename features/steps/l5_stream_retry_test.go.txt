@@ -1,0 +1,147 @@
+package provider
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"reflect"
+	"testing"
+	"time"
+
+	"kogen-loop/sys"
+)
+
+// Acceptance fixture for the Anthropic transient stream retry; copied in by
+// features/steps/l5_stream_retry.js through a go test overlay.
+
+func l5Err(typ any) handler {
+	return sseAnswer(flat(one(start()), one(ev("error", "error", map[string]any{"type": typ, "message": "L5_SECRET_MESSAGE"})))...)
+}
+
+func l5Cut() handler {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", "100000")
+		io.WriteString(w, sse(flat(one(start()), block(0, map[string]any{"type": "text", "text": "partial"}))...))
+		w.(http.Flusher).Flush()
+	}
+}
+
+func l5Tool() handler {
+	return sseAnswer(flat(one(start()), block(0, use("a")), finish("tool_use"))...)
+}
+
+func l5Run(t *testing.T, h ...handler) (*Response, error, *keyFake, *env, *observer) {
+	t.Helper()
+	e, f := keyEnv(t, "anthropic", h...)
+	obs := &observer{}
+	resp, err := e.c.Respond(context.Background(), e.s, Request{Role: claudeRole, Instructions: "p", Input: user("x")}, obs)
+	return resp, err, f, e, obs
+}
+
+func TestL5StreamRetry(t *testing.T) {
+	waits := []time.Duration{2 * time.Second}
+	for _, typ := range []string{"overloaded_error", "api_error", "rate_limit_error"} {
+		t.Run("recovers_"+typ, func(t *testing.T) {
+			resp, err, f, e, obs := l5Run(t, l5Err(typ), claudeText("recovered"))
+			recs := obs.records()
+			if err != nil || resp == nil || len(f.requests()) != 2 || !reflect.DeepEqual(e.clk.slept(), waits) {
+				t.Fatalf("%v, %d requests, slept %v", err, len(f.requests()), e.clk.slept())
+			}
+			if len(recs) != 2 || recs[0]["outcome"] != "failed" || recs[0]["usage_state"] != "unknown" || recs[1]["outcome"] != "completed" {
+				t.Fatalf("records = %s", jsonOf(t, recs))
+			}
+			if got := jsonOf(t, recs[0]["provider_failure"]); got != `{"anthropic_transient":"sse_error","error_type":"`+typ+`"}` {
+				t.Fatalf("diagnostics = %s", got)
+			}
+			if string(f.requests()[0].Body) != string(f.requests()[1].Body) {
+				t.Fatal("the retry changed the request")
+			}
+		})
+	}
+	t.Run("exhausts_after_three", func(t *testing.T) {
+		_, err, f, e, obs := l5Run(t, l5Err("overloaded_error"), l5Err("api_error"), l5Err("overloaded_error"), claudeText("never"))
+		se := mustErr(t, err)
+		if se.Reason != "unavailable" || len(f.requests()) != 3 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second, 8 * time.Second}) || len(obs.records()) != 3 {
+			t.Fatalf("%v, %d requests, slept %v", se, len(f.requests()), e.clk.slept())
+		}
+		if jsonOf(t, se.ProviderFailure) != `{"anthropic_transient":"sse_error","error_type":"overloaded_error"}` {
+			t.Fatalf("diagnostics = %s", jsonOf(t, se.ProviderFailure))
+		}
+	})
+	t.Run("cut_stream_recovers", func(t *testing.T) {
+		resp, err, f, e, obs := l5Run(t, l5Cut(), claudeText("recovered"))
+		recs := obs.records()
+		if err != nil || resp == nil || len(f.requests()) != 2 || !reflect.DeepEqual(e.clk.slept(), waits) || len(recs) != 2 || recs[0]["outcome"] != "failed" {
+			t.Fatalf("%v, %d requests, slept %v, records %s", err, len(f.requests()), e.clk.slept(), jsonOf(t, recs))
+		}
+	})
+	t.Run("cut_stream_exhausts", func(t *testing.T) {
+		_, err, f, _, _ := l5Run(t, l5Cut(), l5Cut(), l5Cut(), claudeText("never"))
+		if se := mustErr(t, err); se.Reason != "unavailable" || len(f.requests()) != 3 {
+			t.Fatalf("%v, %d requests", se, len(f.requests()))
+		}
+	})
+	for name, c := range map[string]struct {
+		h    handler
+		diag string
+	}{
+		"invalid_request_error": {l5Err("invalid_request_error"), `{"anthropic_invalid":"sse_error","error_type":"invalid_request_error"}`},
+		"authentication_error":  {l5Err("authentication_error"), `{"anthropic_invalid":"sse_error","error_type":"authentication_error"}`},
+		"unknown_type":          {l5Err("L5_SECRET_TYPE"), `{"anthropic_invalid":"sse_error","error_type":"unknown"}`},
+		"missing_type":          {sseAnswer(flat(one(start()), one(ev("error")))...), `{"anthropic_invalid":"sse_error","error_type":"unknown"}`},
+		"malformed_frame":       {rawStream(sse(start()) + "data: {broken\n\n" + sse(finish("end_turn")...)), `{"anthropic_invalid":"frame_json_or_shape"}`},
+	} {
+		t.Run("not_retried_"+name, func(t *testing.T) {
+			_, err, f, e, obs := l5Run(t, c.h, claudeText("never"))
+			se := mustErr(t, err)
+			if se.Reason != "invalid_response" || se.Detail != "malformed Anthropic completion" || len(f.requests()) != 1 || len(e.clk.slept()) != 0 || len(obs.records()) != 1 {
+				t.Fatalf("%v, %d requests", se, len(f.requests()))
+			}
+			if jsonOf(t, se.ProviderFailure) != c.diag || jsonOf(t, obs.records()[0]["provider_failure"]) != c.diag {
+				t.Fatalf("diagnostics = %s", jsonOf(t, se.ProviderFailure))
+			}
+		})
+	}
+	t.Run("refusal_and_401_not_retried", func(t *testing.T) {
+		_, err, f, _, _ := l5Run(t, sseAnswer(flat(one(start()), finish("model_context_window_exceeded"))...), claudeText("never"))
+		if se := mustErr(t, err); se.Reason != "context_too_long" || len(f.requests()) != 1 {
+			t.Fatalf("%v, %d requests", se, len(f.requests()))
+		}
+		_, err, f, _, _ = l5Run(t, jsonAnswer(401, map[string]any{"error": map[string]any{"type": "authentication_error"}}), claudeText("never"))
+		if se := mustErr(t, err); se.Reason != "login" || len(f.requests()) != 1 {
+			t.Fatalf("%v, %d requests", se, len(f.requests()))
+		}
+	})
+	t.Run("cancelled_during_wait", func(t *testing.T) {
+		e, f := keyEnv(t, "anthropic", l5Err("overloaded_error"), claudeText("never"))
+		e.c.Sleep = func(ctx context.Context, d time.Duration) error {
+			e.s.Interrupt("SIGINT")
+			return e.clk.Sleep(ctx, d)
+		}
+		_, err := e.c.Respond(context.Background(), e.s, Request{Role: claudeRole, Instructions: "p", Input: user("x")}, nil)
+		if _, ok := err.(*sys.Interrupted); !ok || len(f.requests()) != 1 {
+			t.Fatalf("%T %v, %d requests", err, err, len(f.requests()))
+		}
+	})
+	t.Run("budget_spent_during_wait", func(t *testing.T) {
+		e, f := keyEnv(t, "anthropic", l5Err("overloaded_error"), l5Err("overloaded_error"), claudeText("never"))
+		_, err := e.c.Respond(context.Background(), e.s, Request{Role: claudeRole, Instructions: "p", Input: user("x"), Budget: 2300 * time.Millisecond}, nil)
+		if se := mustErr(t, err); se.Detail != "Anthropic response wait exceeded 30 minutes" || len(f.requests()) != 2 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second, 300 * time.Millisecond}) {
+			t.Fatalf("%v, %d requests, slept %v", err, len(f.requests()), e.clk.slept())
+		}
+	})
+	t.Run("tool_call_response_returned_once", func(t *testing.T) {
+		resp, err, f, e, obs := l5Run(t, l5Tool(), claudeText("never"))
+		if err != nil || resp == nil || len(f.requests()) != 1 || len(e.clk.slept()) != 0 || len(obs.records()) != 1 || obs.records()[0]["outcome"] != "completed" {
+			t.Fatalf("%v, %d requests", err, len(f.requests()))
+		}
+	})
+	t.Run("single_attempt_provider_unchanged", func(t *testing.T) {
+		e, f := retryEnv(t, "chatgpt", failureStream("error", map[string]any{"code": "server_is_overloaded", "message": "x"}), textAnswer("never"))
+		_, err := e.c.Respond(context.Background(), e.s, Request{Role: roleOf("chatgpt"), Instructions: "p", Single: true}, nil)
+		if se := mustErr(t, err); se.Reason != "unavailable" || len(f.requests()) != 1 {
+			t.Fatalf("%v, %d requests", se, len(f.requests()))
+		}
+	})
+}
