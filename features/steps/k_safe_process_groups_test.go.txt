@@ -1,0 +1,198 @@
+package conformance
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"kogen-loop/sys"
+	"kogen-loop/tools"
+)
+
+type ksCase struct {
+	Case string `json:"case"`
+	Kind string `json:"kind"`
+}
+
+func ksEmit(x any) {
+	b, e := json.Marshal(x)
+	if e != nil {
+		panic(e)
+	}
+	fmt.Println("KSAFE " + string(b))
+}
+
+// ksLive is true for an existing, non-zombie process.
+func ksLive(pid int) bool {
+	b, e := exec.Command("/bin/ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	st := strings.TrimSpace(string(b))
+	return e == nil && st != "" && !strings.HasPrefix(st, "Z")
+}
+
+// ksGone is a single, immediate check that no process or group member has this id.
+func ksGone(id int) bool { return syscall.Kill(id, 0) == syscall.ESRCH }
+
+func ksPoll(pid int) bool {
+	for i := 0; i < 100; i++ {
+		if ksGone(pid) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func ksReadPid(t *testing.T, file string) int {
+	t.Helper()
+	b, e := os.ReadFile(file)
+	if e != nil {
+		t.Fatal(e)
+	}
+	n, e := strconv.Atoi(strings.TrimSpace(string(b)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	return n
+}
+
+// ksSibling starts a process the run did not create: a tiny native Go program built
+// once into dir under a unique name (so pkill/killall patterns match only it; no
+// system binary is copied, which macOS refuses to launch), in its own process group.
+func ksSibling(t *testing.T, dir string) (string, int) {
+	t.Helper()
+	name := fmt.Sprintf("ksafe%08x", uint32(time.Now().UnixNano()))
+	src := filepath.Join(dir, "src-"+name)
+	if e := os.MkdirAll(src, 0o700); e != nil {
+		t.Fatal(e)
+	}
+	prog := "package main\n\nimport \"time\"\n\nfunc main() { time.Sleep(600 * time.Second) }\n"
+	if e := os.WriteFile(filepath.Join(src, "main.go"), []byte(prog), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	p := filepath.Join(dir, name)
+	b := exec.Command("go", "build", "-o", p, "main.go")
+	b.Dir = src
+	b.Env = append(os.Environ(), "GOFLAGS=", "GO111MODULE=off")
+	if out, e := b.CombinedOutput(); e != nil {
+		t.Fatalf("sibling build: %v\n%s", e, out)
+	}
+	c := exec.Command(p, "600")
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if e := c.Start(); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { c.Process.Kill(); c.Wait() })
+	if !ksLive(c.Process.Pid) {
+		t.Fatal("sibling did not start")
+	}
+	return name, c.Process.Pid
+}
+
+const ksRefusal = "refused: this command would stop processes this run did not start (rule: "
+
+func ksTool(t *testing.T, tl *tools.Tools, command string) string {
+	t.Helper()
+	out, e := tl.Run("shell", map[string]any{"command": command})
+	if e != nil {
+		t.Fatalf("shell tool error: %v", e)
+	}
+	return out.Text
+}
+
+// Child that leaves the run's group with setsid; started through the test binary itself.
+func TestKSafeSetsidChild(t *testing.T) {
+	f := os.Getenv("KS_PIDFILE")
+	if f == "" {
+		return
+	}
+	if _, e := syscall.Setsid(); e != nil {
+		os.Exit(3)
+	}
+	os.WriteFile(f, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	time.Sleep(30 * time.Second)
+}
+
+func TestKSafeAcceptance(t *testing.T) {
+	raw := os.Getenv("KSAFE_CASE")
+	if raw == "" {
+		return
+	}
+	var c ksCase
+	if e := json.Unmarshal([]byte(raw), &c); e != nil {
+		t.Fatal(e)
+	}
+	root := t.TempDir()
+	s := sys.NewWith(os.Environ(), root)
+	t.Cleanup(func() { sys.Terminate(s.Groups()) })
+	tl := &tools.Tools{Root: root, Session: s, Enabled: []string{"shell"}}
+	switch c.Case {
+	case "refuse":
+		name, pid := ksSibling(t, root)
+		cmds := map[string]string{
+			"pkill":         "pkill -f " + name,
+			"killall":       "killall " + name,
+			"usr-bin-pkill": "/usr/bin/pkill -f " + name,
+			"kill-pid":      "kill " + strconv.Itoa(pid),
+			"kill-pgid":     "kill -9 -" + strconv.Itoa(pid),
+		}
+		command, ok := cmds[c.Kind]
+		if !ok {
+			t.Fatalf("unknown kind %q", c.Kind)
+		}
+		res, err := s.Run(command, root, sys.Options{RefuseForeignKill: true, KillGroupOnExit: true})
+		run := map[string]any{"err": fmt.Sprint(err), "statusNonZero": res.Status != 0,
+			"namesRule": strings.Contains(res.Output, ksRefusal) && strings.Contains(res.Output, "kill $!"),
+			"ruleSet": res.Rule != "", "timedOut": res.TimedOut, "siblingLive": ksLive(pid)}
+		text := ksTool(t, tl, command)
+		tool := map[string]any{"refused": strings.HasPrefix(text, "refused:"),
+			"namesRule": strings.Contains(text, ksRefusal) && strings.Contains(text, "kill $!"),
+			"siblingLive": ksLive(pid), "nextOk": ksTool(t, tl, "echo next") == "exit status: 0\nnext\n"}
+		ksEmit(map[string]any{"run": run, "tool": tool})
+	case "group-exit":
+		res, err := s.Run("sleep 600 >/dev/null 2>&1 & echo $! > on.pid; exit 0", root, sys.Options{KillGroupOnExit: true})
+		pid := ksReadPid(t, filepath.Join(root, "on.pid"))
+		g := s.Groups()[0]
+		on := map[string]any{"err": fmt.Sprint(err), "status": res.Status, "timedOut": res.TimedOut, "output": res.Output,
+			"pidGone": ksGone(pid), "groupGone": ksGone(-g)}
+		res, err = s.Run("sleep 600 >/dev/null 2>&1 & echo $! > off.pid; exit 0", root, sys.Options{})
+		offPid := ksReadPid(t, filepath.Join(root, "off.pid"))
+		off := map[string]any{"err": fmt.Sprint(err), "status": res.Status, "pidLive": ksLive(offPid)}
+		syscall.Kill(offPid, syscall.SIGKILL)
+		ksEmit(map[string]any{"on": on, "off": off})
+	case "own-kill":
+		runs := []map[string]any{}
+		for _, command := range []string{"sleep 600 & kill $!", "sleep 600 & p=$!; kill -9 $p"} {
+			res, err := s.Run(command, root, sys.Options{RefuseForeignKill: true, KillGroupOnExit: true})
+			runs = append(runs, map[string]any{"err": fmt.Sprint(err), "status": res.Status, "rule": res.Rule})
+		}
+		first := ksTool(t, tl, "sleep 600 >/dev/null 2>&1 & echo $!")
+		pid, e := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(first, "exit status: 0\n")))
+		if e != nil {
+			t.Fatalf("first call text %q", first)
+		}
+		between := ksLive(pid)
+		second := ksTool(t, tl, "kill "+strconv.Itoa(pid))
+		ksEmit(map[string]any{"runs": runs, "tool": map[string]any{"aliveBetween": between,
+			"killRefused": strings.HasPrefix(second, "refused:"), "killStatus0": strings.HasPrefix(second, "exit status: 0\n"), "gone": ksPoll(pid)}})
+	case "deadline":
+		res, err := s.Run("sleep 600 >/dev/null 2>&1 & echo $! > d.pid; wait", root, sys.Options{Timeout: time.Second, KillGroupOnExit: true})
+		pid := ksReadPid(t, filepath.Join(root, "d.pid"))
+		ksEmit(map[string]any{"err": fmt.Sprint(err), "timedOut": res.TimedOut, "pidGone": ksGone(pid), "groupGone": ksGone(-s.Groups()[0])})
+	case "setsid":
+		pidfile := filepath.Join(root, "escaped.pid")
+		command := `"$KS_BIN" -test.run='^TestKSafeSetsidChild$' >/dev/null 2>&1 & while [ ! -s "$KS_PIDFILE" ]; do sleep 0.05; done; exit 0`
+		res, err := s.Run(command, root, sys.Options{KillGroupOnExit: true, Env: map[string]string{"KS_BIN": os.Args[0], "KS_PIDFILE": pidfile}})
+		pid := ksReadPid(t, pidfile)
+		defer syscall.Kill(pid, syscall.SIGKILL)
+		ksEmit(map[string]any{"err": fmt.Sprint(err), "status": res.Status, "timedOut": res.TimedOut, "escapedLive": ksLive(pid)})
+	default:
+		t.Fatalf("unknown case %q", c.Case)
+	}
+}
