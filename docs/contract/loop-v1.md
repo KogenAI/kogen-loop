@@ -502,3 +502,40 @@ defer client.EndPrefixLog(req)
 
 Ending releases only instrumentation state; it does not change prompt-cache state.
 Reusing an ended identity starts with `first`.
+
+### Caller-owned read ledger (Go library only)
+
+`Round.ReadLedger` is nil by default and leaves tool output and requests unchanged. A
+caller may opt in with `ledger := loop.NewReadLedger()` and reuse that pointer on
+`Round` values for a logical round. Successful nonterminal built-in `read_file` and
+`view_image` calls are retained in order, including duplicates and reads before a
+later error. Failed, skipped, terminal and host-handled calls are not retained.
+
+A caller deciding to discard its working conversation explicitly constructs a fresh
+input and records the returned event using its own run-event sink:
+
+```go
+ledger := loop.NewReadLedger()
+round := loop.Round{ReadLedger: ledger} // configure the other fields as usual
+// Call loop.Run with round; the caller may later decide to reset its window.
+input, event := ledger.Continuation(freshBase)
+// Emit event to the caller's run-event sink, then call loop.Run with round and input.
+_, _ = input, event
+```
+
+Continuation copies the base slice and appends exactly one user message containing
+compact JSON. It does not replay old conversation or clear the ledger. Its content
+is capped at 8192 UTF-8 bytes including the JSON envelope; oldest entries are evicted
+first, including an oversized entry itself. The dropped count is cumulative. The
+returned `read_ledger_reset` event reports retained `entries`, content `bytes`, and
+`dropped`; every explicit continuation returns an event, even when empty. The caller
+owns the ledger and event emission; there is no standalone reset event or CLI option.
+
+Text entries disclose the first non-empty delivered source line as a trimmed note,
+limited to 80 Unicode scalars, and the actual inclusive line range. The SHA256 is
+of the final delivered numbered text, including any output truncation marker (empty
+output hashes empty bytes). Image entries contain only the argument path and the
+existing snapshot SHA256, not image bytes or dimensions. Apart from the bounded note,
+continuation contains no read result text or replayed tool output. Paths preserve
+argument spelling. This option does not trigger resets or change budget limits:
+`FailOverBudget` still refuses over-budget requests without sending or clipping.

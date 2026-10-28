@@ -203,6 +203,7 @@ func (e *NoProgressError) Error() string {
 
 // Round describes one round.
 type Round struct {
+	ReadLedger               *ReadLedger // optional caller-owned history across runs
 	Owner                    string
 	Role                     provider.Role
 	Instructions             string
@@ -351,7 +352,11 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 						out = o
 					}
 					if rd.Tools != nil {
+						uncut := out.Text
 						out = rd.Tools.Cut(out)
+						if rd.ReadLedger != nil && out.ReadOK {
+							rd.ReadLedger.record(call, out, uncut)
+						}
 					} else {
 						out = out.Cut()
 					}
