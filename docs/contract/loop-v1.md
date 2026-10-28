@@ -135,6 +135,16 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
 - Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
 
+### Disabling parallel tool calls (Go library)
+
+`DisableParallelToolCalls bool` on `loop.Round`, `loop.Request` and `provider.Request` is a library-only research option: no task JSON field or CLI flag exists. `Run` copies it from `Round` into every `Request`; `Direct` transmits it and `FailOverBudget` measures the same configured body.
+
+- Default: false (including omission) sends today's exact request bytes on every route; the provider's own parallel-call behavior is preserved.
+- True on the Responses wire (ChatGPT, SuperGrok) renders `parallel_tool_calls: false`, also with no tools. True on the Messages wire (Anthropic) renders `tool_choice.disable_parallel_tool_use: true` beside the existing choice `type`; with no tools no `tool_choice` is created.
+- Support follows the effective wire after profile resolution, not the provider name. A Chat Completions route (OpenCode Go, OpenAI-compatible) refuses true before any transport with a provider `unsupported_capability` error naming parallel tool calls and the route.
+- A provider rejection is returned as an honest error; the request is not silently retried without the control.
+- Batch semantics are unchanged: every call returned in a batch is still executed, including calls after a terminal call. The option asks the provider to generate fewer parallel calls; it does not truncate a batch. Replay, usage, cache placement, retries and credentials are unchanged.
+
 ### Process-group sweep and foreign-kill refusal (Go library)
 
 `sys.Options.KillGroupOnExit` (default false): after the command's leader has ended,

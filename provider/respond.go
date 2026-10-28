@@ -20,6 +20,10 @@ type Request struct {
 	Role         Role
 	Instructions string
 	Input, Tools []any
+	// DisableParallelToolCalls asks the provider not to generate parallel tool calls: Responses
+	// parallel_tool_calls false, Messages tool_choice.disable_parallel_tool_use true. Chat
+	// Completions routes refuse it. False sends today's exact bytes.
+	DisableParallelToolCalls bool
 	// Budget caps the logical call's absolute wait; zero or more than ResponseBudget means
 	// ResponseBudget.
 	Budget time.Duration

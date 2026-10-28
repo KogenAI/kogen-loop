@@ -30,6 +30,9 @@ type Request struct {
 	Instructions string
 	Input        []any // Responses-style input items
 	Tools        []any // model-facing tool definitions, sent verbatim
+	// DisableParallelToolCalls asks the provider not to generate parallel tool calls; a batch
+	// that is returned is still executed in full.
+	DisableParallelToolCalls bool
 }
 
 // Requester sends one request. It returns the response and the input actually sent (a
@@ -71,7 +74,7 @@ func (p FailOverBudget) Prepare(ctx context.Context, r Request) ([]any, error) {
 	}
 	body := client.Body(provider.Request{
 		Role: r.Role, Instructions: r.Instructions, Input: r.Input, Tools: r.Tools,
-		CacheID: p.CacheID, Cache: p.Cache,
+		CacheID: p.CacheID, Cache: p.Cache, DisableParallelToolCalls: r.DisableParallelToolCalls,
 	})
 	m, err := tools.Measure(body, r.Role)
 	if err != nil {
@@ -120,7 +123,7 @@ func (d *Direct) Request(ctx context.Context, r Request) (*provider.Response, []
 	}
 	resp, err := client.Respond(ctx, d.Session, provider.Request{
 		Role: r.Role, Instructions: r.Instructions, Input: sent, Tools: r.Tools,
-		CacheID: d.CacheID, Cache: d.Cache,
+		CacheID: d.CacheID, Cache: d.Cache, DisableParallelToolCalls: r.DisableParallelToolCalls,
 	}, d.Observer)
 	if err != nil {
 		return nil, nil, err
@@ -174,13 +177,14 @@ func (e *NoProgressError) Error() string {
 
 // Round describes one round.
 type Round struct {
-	Owner        string
-	Role         provider.Role
-	Instructions string
-	Definitions  []any        // tool definitions sent to the model
-	Tools        *tools.Tools // executes non-handled calls (enabled set, protected/excluded paths)
-	Terminal     []string     // names that end the round without execution; default ["finish"]
-	MaxRounds    int          // stop with RoundLimitError after this many requests when the round would continue; 0 is no limit (no default)
+	Owner                    string
+	Role                     provider.Role
+	Instructions             string
+	Definitions              []any        // tool definitions sent to the model
+	Tools                    *tools.Tools // executes non-handled calls (enabled set, protected/excluded paths)
+	Terminal                 []string     // names that end the round without execution; default ["finish"]
+	DisableParallelToolCalls bool         // ask the provider for one tool call per response; unsupported routes refuse
+	MaxRounds                int          // stop with RoundLimitError after this many requests when the round would continue; 0 is no limit (no default)
 }
 
 // Ending is how a round ended. Both endings are model claims.
@@ -244,6 +248,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 		requests++
 		resp, sent, err := rq.Request(ctx, Request{
 			Owner: rd.Owner, Role: rd.Role, Instructions: rd.Instructions, Input: input, Tools: rd.Definitions,
+			DisableParallelToolCalls: rd.DisableParallelToolCalls,
 		})
 		if err != nil {
 			return Result{}, err

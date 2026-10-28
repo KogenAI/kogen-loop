@@ -51,7 +51,11 @@ func renderMessages(info Info, req Request, id string, input []any) (rendered, e
 		if p := ResolveProfile(req.Role); p != nil {
 			choice = p.Settings.Tools
 		}
-		body["tool_choice"] = map[string]any{"type": choice}
+		toolChoice := map[string]any{"type": choice}
+		if req.DisableParallelToolCalls {
+			toolChoice["disable_parallel_tool_use"] = true
+		}
+		body["tool_choice"] = toolChoice
 		body["tools"] = tools
 	}
 	body["system"] = []any{map[string]any{"type": "text", "text": req.Instructions, "cache_control": ephemeral()}}
