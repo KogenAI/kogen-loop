@@ -24,6 +24,11 @@ type Request struct {
 	// parallel_tool_calls false, Messages tool_choice.disable_parallel_tool_use true. Chat
 	// Completions routes refuse it. False sends today's exact bytes.
 	DisableParallelToolCalls bool
+	// AuthorityBoundary, when non-nil, is the zero-based content block index in the first
+	// user message that ends the stable authority; the Messages wire puts one extra
+	// cache breakpoint there (at most four in all). Nil sends today's exact bytes; other
+	// routes ignore it.
+	AuthorityBoundary *int
 	// Budget caps the logical call's absolute wait; zero or more than ResponseBudget means
 	// ResponseBudget.
 	Budget time.Duration

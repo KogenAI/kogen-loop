@@ -153,6 +153,16 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - A provider rejection is returned as an honest error; the request is not silently retried without the control.
 - Batch semantics are unchanged: every call returned in a batch is still executed, including calls after a terminal call. The option asks the provider to generate fewer parallel calls; it does not truncate a batch. Replay, usage, cache placement, retries and credentials are unchanged.
 
+### Authority cache breakpoint (Go library, Messages wire)
+
+`AuthorityBoundary *int` on `provider.Request` is a library-only research option: no task JSON field, CLI flag or loop option exists. It enables an experiment (review cached-input share and cost); it measures nothing and claims no benefit.
+
+- Default: nil (off) sends today's exact request bytes on every route. Other routes (Responses, Chat Completions) ignore the option even when set.
+- Non-nil is a zero-based content block index in the first user message; a string content is block 0. On the Messages wire the block gets one extra `cache_control` marker, on the selected last stable authority block rather than the dynamic evidence after it. Ordinary text blocks keep their boundaries; raw `anthropic_message` blocks retain theirs. The caller's input is never modified.
+- TTL policy is that of the existing breakpoints: implicit five minutes, no explicit `ttl`. This adds no TTL feature.
+- Distinct final `cache_control` locations across tools, system and messages (including retained raw markers) are counted. A target that is already the newest-message marker or already marked is not counted twice. More than four is refused with `cache breakpoint limit exceeded`; markers are never silently dropped.
+- Preflight errors, before any HTTP request: a negative or out-of-range index, no user message or a non-text target return a provider `invalid_request` error containing `invalid authority boundary`. The validation applies only when enabled.
+
 ### Process-group sweep and foreign-kill refusal (Go library)
 
 `sys.Options.KillGroupOnExit` (default false): after the command's leader has ended,
