@@ -1,0 +1,71 @@
+package loop_test
+
+// Independent acceptance collector injected by Go's overlay (kept as text so ordinary
+// module tests do not register it as product code). It only reports observations.
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"testing"
+
+	"kogen-loop/loop"
+	"kogen-loop/provider"
+)
+
+type rlConfig struct {
+	MaxRounds    int      `json:"maxRounds"`
+	Script       int      `json:"script"`
+	NoProgress   bool     `json:"noProgress"`
+	Fingerprints []string `json:"fingerprints"`
+}
+
+// rlFake answers script requests with a non-terminal call, then with a terminal finish call.
+type rlFake struct{ script, n int }
+
+func (f *rlFake) Request(ctx context.Context, r loop.Request) (*provider.Response, []any, error) {
+	f.n++
+	name := "noop"
+	if f.n > f.script {
+		name = "finish"
+	}
+	return &provider.Response{Items: []map[string]any{{
+		"type": "function_call", "call_id": fmt.Sprintf("c%d", f.n), "name": name, "arguments": "{}",
+	}}}, r.Input, nil
+}
+
+func TestRoundLimitAcceptance(t *testing.T) {
+	var c rlConfig
+	if err := json.Unmarshal([]byte(os.Getenv("RL_CASE")), &c); err != nil {
+		t.Fatal(err)
+	}
+	fake := &rlFake{script: c.Script}
+	h := loop.Hooks{}
+	if c.NoProgress {
+		h.Progress = func(ctx context.Context, round int) (string, error) {
+			i := round - 1
+			if i >= len(c.Fingerprints) {
+				i = len(c.Fingerprints) - 1
+			}
+			return c.Fingerprints[i], nil
+		}
+	}
+	rd := loop.Round{Owner: "acceptance", Role: provider.Role{Provider: "fake"}, MaxRounds: c.MaxRounds}
+	res, err := loop.Run(context.Background(), rd, []any{map[string]any{"role": "user", "content": "go"}}, fake, h)
+	obs := map[string]any{"requests": fake.n, "resultRequests": res.Requests, "ending": string(res.Ending),
+		"limit": nil, "noProgress": nil, "otherError": nil, "noProgressRounds": loop.NoProgressRounds}
+	var rl *loop.RoundLimitError
+	var np *loop.NoProgressError
+	switch {
+	case err == nil:
+	case errors.As(err, &rl):
+		obs["limit"] = rl.Rounds
+	case errors.As(err, &np):
+		obs["noProgress"] = map[string]any{"rounds": np.Rounds, "fingerprint": np.Fingerprint}
+	default:
+		obs["otherError"] = err.Error()
+	}
+	b, _ := json.Marshal(obs)
+	fmt.Println("RLOBS " + string(b))
+}
