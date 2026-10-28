@@ -24,6 +24,13 @@ type Request struct {
 	// parallel_tool_calls false, Messages tool_choice.disable_parallel_tool_use true. Chat
 	// Completions routes refuse it. False sends today's exact bytes.
 	DisableParallelToolCalls bool
+	// ToolChoice, when nonempty, names the one tool the provider must call for this request
+	// (an API-level requirement): Responses {"type":"function","name":N}, Chat Completions
+	// {"type":"function","function":{"name":N}}. It applies only when Tools is nonempty. A
+	// route that cannot force a tool (see SupportsToolChoice) refuses the request with
+	// provider/unsupported_capability before any transport, never ignoring it. Empty sends
+	// today's exact bytes.
+	ToolChoice string
 	// AuthorityBoundary, when non-nil, is the zero-based content block index in the first
 	// user message that ends the stable authority; the Messages wire puts one extra
 	// cache breakpoint there (at most four in all). Nil sends today's exact bytes; other

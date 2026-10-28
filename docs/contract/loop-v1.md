@@ -175,6 +175,16 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - A provider rejection is returned as an honest error; the request is not silently retried without the control.
 - Batch semantics are unchanged: every call returned in a batch is still executed (unless `StopAfterTerminal` is set), including calls after a terminal call. The option asks the provider to generate fewer parallel calls; it does not truncate a batch. Replay, usage, cache placement, retries and credentials are unchanged.
 
+### Named provider tool choice (Go library)
+
+`provider.Request.ToolChoice string` is a library-only option: no task JSON field, CLI flag or loop option exists, and thinking and every other request field are unchanged. A nonempty value names the one tool the provider must call for this request at the API level (for example `submit`). `provider.SupportsToolChoice(provider.Role) bool` reports whether the role's route can do that.
+
+- Empty (the default) sends today's exact request bytes on every route, including the existing automatic `tool_choice` fields and the `disable_parallel_tool_use` control; it adds no choice.
+- With tools, the Responses wire (ChatGPT, SuperGrok) sends `tool_choice: {"type":"function","name":"submit"}` and the Chat Completions wire (OpenCode Go, OpenAI-compatible) sends `{"type":"function","function":{"name":"submit"}}`; any other name uses the same transformation. The name is not checked against `Tools`. Without tools no `tool_choice` is sent, as before; an unsupported route still refuses.
+- Support follows the effective wire and profile settings after profile resolution, exactly as rendering does. Current Anthropic Messages profiles use adaptive thinking, which does not permit a forced tool: `SupportsToolChoice` reports false. Unknown providers report false. A Messages profile with thinking disabled would encode `{"type":"tool","name":"submit"}` (keeping `disable_parallel_tool_use` when requested); none exists today.
+- An unsupported route refuses a nonempty `ToolChoice` in `Render` and `Respond` with `provider/unsupported_capability`, exit 4, a detail naming `ToolChoice` and the route (for example `Messages route anthropic`), before any credential lookup, network call or attempt record. It is never silently ignored or weakened.
+- Reminder fallback: a caller that needs a terminal call on an unsupported route checks `SupportsToolChoice` and leaves `ToolChoice` empty, relying on `TerminalReminders` (see Terminal reminders) to ask for the terminal call instead.
+
 ### Authority cache breakpoint (Go library, Messages wire)
 
 `AuthorityBoundary *int` on `provider.Request` is a library-only research option: no task JSON field, CLI flag or loop option exists. It enables an experiment (review cached-input share and cost); it measures nothing and claims no benefit.
