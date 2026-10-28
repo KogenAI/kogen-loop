@@ -25,7 +25,6 @@ models:
     provider: chatgpt
     model: gpt-6.1-terra
     effort: high
-    max_rounds: 6
   review:
     provider: chatgpt
     model: gpt-6.1-terra
