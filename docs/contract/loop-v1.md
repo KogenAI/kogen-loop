@@ -449,3 +449,34 @@ A documentation `fetch` accepts optional `offset` (integer) and `find` (string).
 Every fetch outcome reports `body_total`, the decoded body bytes (zero when no body was retrieved). A ranged fetch (`offset` or `find` given) also reports `body_offset`, the source byte where `body` starts. `next_offset`, present only when source remains after fitting, is the first unconsumed source byte (`body_offset` plus the source bytes emitted); the synthetic untrusted marker consumes no source bytes. Pass it as `offset` for the next call; each call is one independent fetch, nothing is cached and no limit, timeout or retry changes.
 
 Exception: a plain fetch (no `offset`, no `find`) returns exactly the body bytes it always did and adds only `body_total` and, when truncated, `next_offset`; it never reports `body_offset`. Search output is unchanged.
+
+### Provider request prefix events (Go library only)
+
+Set `provider.Client.PrefixLog` before concurrent use to receive synchronous
+`provider.PrefixEvent` callbacks immediately before each model HTTP attempt, including
+retries. Authentication requests and `Render`/`Body` measurements do not emit events.
+`ConversationID` follows the request's cache identity; `Role` and a snapshot of
+`Request.Context` allow host-side grouping. Events contain no request body. Avoid putting
+secrets or body contents in `Context` yourself. The callback has no error return and must
+not reenter prefix logging on the same client.
+
+`first` has nil `PreviousBytes` and `Offset`; `identical` has both sizes and a nil
+`Offset`; `diverged` has both sizes and a zero-based byte `Offset`. A strict prefix
+diverges at the shorter length. The client retains only the immediately previous exact
+body for each active conversation, bounded by the accepted request-body limit (default
+524288 bytes); total memory is proportional to active conversations. A nil callback
+retains no instrumentation state. No cache benefit is implied.
+
+Direct provider callers must end the instrumentation lifetime when the conversation ends,
+including on errors or cancellation, not after each Respond:
+
+```go
+client := provider.NewClient("host")
+client.PrefixLog = func(event provider.PrefixEvent) { /* consume metadata */ }
+req := provider.Request{Role: role, Scope: scope}
+defer client.EndPrefixLog(req)
+// Use client.Respond with req throughout this conversation.
+```
+
+Ending releases only instrumentation state; it does not change prompt-cache state.
+Reusing an ended identity starts with `first`.
