@@ -64,6 +64,7 @@ type SessionConfig struct {
 	Terminal     []string // default ["finish"]
 	// TerminalReminders is Round.TerminalReminders (Go only; no task or CLI setting).
 	TerminalReminders int
+	CacheID           string // optional provider cache/routing identity; empty uses the session ID
 	Dir               string // transcript directory ("" = in memory)
 	Client            *provider.Client
 	Session           *sys.Session
@@ -128,6 +129,9 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 	}
 	s.id = "session-" + hex.EncodeToString(b)
 	s.direct.CacheID = s.id
+	if cfg.CacheID != "" {
+		s.direct.CacheID = cfg.CacheID
+	}
 	return s, nil
 }
 
@@ -171,6 +175,9 @@ func ResumeSession(cfg SessionConfig) (*Session, error) {
 	}
 	s.id, s.input, s.pending = t.SessionID, t.Input, t.Terminal
 	s.direct.CacheID = s.id
+	if cfg.CacheID != "" {
+		s.direct.CacheID = cfg.CacheID
+	}
 	return s, nil
 }
 
