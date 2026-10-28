@@ -38,9 +38,9 @@ func TestLDocboundDefaults(t *testing.T) {
 		{"search", map[string]any{"operation": "search", "query": "hit", "base": base},
 			`{"body":"","error":"","operation":"search","query":"hit","sources":[{"title":"A","url":"BASE/a"}],"status":"retrieved","truncated":false,"untrusted":false,"url":""}`},
 		{"fetch", map[string]any{"operation": "fetch", "url": base + "/a", "base": base},
-			`{"body":"fact\n","error":"","operation":"fetch","query":"","sources":[],"status":"retrieved","truncated":false,"untrusted":true,"url":"BASE/a"}`},
+			`{"body":"fact\n","body_total":5,"error":"","operation":"fetch","query":"","sources":[],"status":"retrieved","truncated":false,"untrusted":true,"url":"BASE/a"}`},
 		{"hostile", map[string]any{"operation": "fetch", "url": base + "/hostile", "base": base},
-			`{"body":"` + marker + `\n","error":"documentation response untrusted","operation":"fetch","query":"","sources":[],"status":"untrusted","truncated":false,"untrusted":true,"url":"BASE/hostile"}`},
+			`{"body":"` + marker + `\n","body_total":29,"error":"documentation response untrusted","operation":"fetch","query":"","sources":[],"status":"untrusted","truncated":false,"untrusted":true,"url":"BASE/hostile"}`},
 	}
 	for _, c := range cases {
 		got := norm(zero.Lookup(c.args))
@@ -53,7 +53,7 @@ func TestLDocboundDefaults(t *testing.T) {
 	}
 	big := map[string]any{"operation": "fetch", "url": base + "/big", "base": base}
 	z, e := norm(zero.Lookup(big)), norm(explicit.Lookup(big))
-	wantBig := `{"body":"` + marker + strings.Repeat("a", (20000+len(marker))/2) + `","error":"documentation response untrusted","operation":"fetch","query":"","sources":[],"status":"untrusted","truncated":true,"untrusted":true,"url":"BASE/big"}`
+	wantBig := `{"body":"` + marker + strings.Repeat("a", (20000+len(marker))/2) + `","body_total":20028,"error":"documentation response untrusted","next_offset":10014,"operation":"fetch","query":"","sources":[],"status":"untrusted","truncated":true,"untrusted":true,"url":"BASE/big"}`
 	if z != wantBig || e != wantBig {
 		t.Errorf("truncated default output differs from snapshot: zero %d, explicit %d, want %d bytes", len(z), len(e), len(wantBig))
 	}

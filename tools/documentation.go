@@ -83,6 +83,26 @@ type docResult struct {
 	Body                          string
 	Untrusted, Truncated          bool
 	Error                         string
+
+	// Fetch outcomes report body_total; ranged ones also body_offset. Start is the source
+	// byte where Body begins, Synth the bytes of Body that are a synthetic marker prefix.
+	Fetch, Ranged          bool
+	Start, Total, Synth    int
+	BodyOffset, NextOffset int
+	HasNext                bool
+}
+
+// derive sets next_offset: the first unconsumed source byte, absent at the end.
+func (r *docResult) derive() {
+	if !r.Fetch || r.Status == "not_found" {
+		return
+	}
+	consumed := len(r.Body) - r.Synth
+	if consumed < 0 {
+		consumed = 0
+	}
+	r.NextOffset = r.Start + consumed
+	r.HasNext = r.Total > 0 && r.NextOffset < r.Total
 }
 
 func (r docResult) value() map[string]any {
@@ -90,10 +110,20 @@ func (r docResult) value() map[string]any {
 	for i, s := range r.Sources {
 		sources[i] = map[string]any{"url": s.URL, "title": s.Title}
 	}
-	return map[string]any{
+	v := map[string]any{
 		"operation": r.Operation, "status": r.Status, "query": r.Query, "url": r.URL, "sources": sources,
 		"body": r.Body, "untrusted": r.Untrusted, "truncated": r.Truncated, "error": r.Error,
 	}
+	if r.Fetch {
+		v["body_total"] = r.Total
+		if r.Ranged {
+			v["body_offset"] = r.BodyOffset
+		}
+		if r.HasNext {
+			v["next_offset"] = r.NextOffset
+		}
+	}
+	return v
 }
 
 func docOf(operation, status, query, url string, sources []docSource, body string, untrusted bool, errText string) docResult {
@@ -102,6 +132,47 @@ func docOf(operation, status, query, url string, sources []docSource, body strin
 
 func docUnsupportedResult(operation, query, url string) docResult {
 	return docOf(operation, "unsupported", query, url, nil, "", false, docUnsupported)
+}
+
+// docRange is the optional range of a fetch: Offset is a requested byte index, Find text
+// to start at.
+type docRange struct {
+	Offset int64
+	Find   string
+	Set    bool
+}
+
+func docRangeOf(args map[string]any) docRange {
+	rg := docRange{Find: docString(args, "find")}
+	switch n := args["offset"].(type) {
+	case float64:
+		rg.Set = true
+		switch {
+		case n != n || n <= 0:
+		case n >= 1<<62:
+			rg.Offset = 1 << 62
+		default:
+			rg.Offset = int64(n)
+		}
+	case int:
+		rg.Set, rg.Offset = true, int64(n)
+	case int64:
+		rg.Set, rg.Offset = true, n
+	case json.Number:
+		if f, err := n.Float64(); err == nil {
+			return docRangeOf(map[string]any{"offset": f, "find": rg.Find})
+		}
+	}
+	if rg.Offset < 0 {
+		rg.Offset = 0
+	}
+	rg.Set = rg.Set || rg.Find != ""
+	return rg
+}
+
+func docFetchFailure(r docResult, rg docRange) docResult {
+	r.Fetch, r.Ranged = true, rg.Set
+	return r
 }
 
 func docString(args map[string]any, key string) string {
@@ -120,7 +191,7 @@ func (d Documentation) Lookup(args map[string]any) string {
 		operation = op
 	}
 	query, u, base := docString(args, "query"), docString(args, "url"), docString(args, "base")
-	return d.encode(d.dispatch(operation, query, u, base))
+	return d.encode(d.dispatch(operation, query, u, base, docRangeOf(args)))
 }
 
 func (d Documentation) encode(r docResult) string {
@@ -132,13 +203,13 @@ func (d Documentation) encode(r docResult) string {
 	return string(b)
 }
 
-func (d Documentation) dispatch(operation, query, u, base string) docResult {
+func (d Documentation) dispatch(operation, query, u, base string, rg docRange) docResult {
 	if base == "" {
 		switch operation {
 		case "search":
 			return d.publicSearch(query)
 		case "fetch":
-			return d.publicFetch(query, u)
+			return d.publicFetch(query, u, rg)
 		}
 		return docUnsupportedResult(operation, query, u)
 	}
@@ -147,7 +218,7 @@ func (d Documentation) dispatch(operation, query, u, base string) docResult {
 	case "search":
 		return d.basedSearch(query, base)
 	case "fetch":
-		return d.basedFetch(query, u, base)
+		return d.basedFetch(query, u, base, rg)
 	}
 	return docUnsupportedResult(operation, query, u)
 }
@@ -171,12 +242,12 @@ func (d Documentation) publicSearch(query string) docResult {
 	return docOf("search", "retrieved", query, "", sources, "", false, "")
 }
 
-func (d Documentation) publicFetch(query, u string) docResult {
+func (d Documentation) publicFetch(query, u string, rg docRange) docResult {
 	if !docHTTPURL(u) {
-		return docUnsupportedResult("fetch", query, u)
+		return docFetchFailure(docUnsupportedResult("fetch", query, u), rg)
 	}
 	status, body, err := d.get(u, "")
-	return classifyFetch(query, u, status, body, err)
+	return classifyFetch(query, u, status, body, err, rg)
 }
 
 func (d Documentation) basedSearch(query, base string) docResult {
@@ -190,31 +261,117 @@ func (d Documentation) basedSearch(query, base string) docResult {
 	return docOf("search", "retrieved", query, "", fixtureSources(body), "", false, "")
 }
 
-func (d Documentation) basedFetch(query, u, base string) docResult {
+func (d Documentation) basedFetch(query, u, base string, rg docRange) docResult {
 	if !strings.HasPrefix(u, base) || !docSameOrigin(u, base) {
-		return docUnsupportedResult("fetch", query, u)
+		return docFetchFailure(docUnsupportedResult("fetch", query, u), rg)
 	}
 	status, body, err := d.get(u, base)
-	return classifyFetch(query, u, status, body, err)
+	return classifyFetch(query, u, status, body, err, rg)
 }
 
-func classifyFetch(query, u string, status int, raw []byte, err error) docResult {
+func classifyFetch(query, u string, status int, raw []byte, err error, rg docRange) docResult {
 	switch {
 	case err != nil:
-		return docOf("fetch", "unreachable", query, u, nil, "", false, docUnreachable)
+		return docFetchFailure(docOf("fetch", "unreachable", query, u, nil, "", false, docUnreachable), rg)
 	case status != 200:
-		return docUnsupportedResult("fetch", query, u)
+		return docFetchFailure(docUnsupportedResult("fetch", query, u), rg)
 	}
 	marked := strings.Contains(string(raw), docMarker)
 	text := docUTF8(raw)
-	if marked {
-		if !strings.Contains(text, docMarker) {
-			text = docMarker + text
+	start := 0
+	if rg.Set {
+		start = docNormalizeOffset(text, rg.Offset)
+		if rg.Find != "" {
+			at := docFind(text, start, rg.Find)
+			if at < 0 {
+				r := docOf("fetch", "not_found", query, u, nil, "", true, "find text not found in the page")
+				r.Fetch, r.Ranged, r.Total, r.BodyOffset = true, true, len(text), start
+				return r
+			}
+			start = at
 		}
-		r := docOf("fetch", "untrusted", query, u, nil, text, true, docUntrusted)
-		return r
 	}
-	return docOf("fetch", "retrieved", query, u, nil, text, true, "")
+	r := docOf("fetch", "retrieved", query, u, nil, text[start:], true, "")
+	if marked {
+		r.Status, r.Error = "untrusted", docUntrusted
+		if !strings.Contains(r.Body, docMarker) {
+			r.Body = docMarker + r.Body
+			r.Synth = len(docMarker)
+		}
+	}
+	r.Fetch, r.Ranged, r.Total, r.Start, r.BodyOffset = true, rg.Set, len(text), start, start
+	return r
+}
+
+// docNormalizeOffset clamps the offset into the text and moves an interior UTF-8 position
+// back to its rune start.
+func docNormalizeOffset(text string, offset int64) int {
+	if offset >= int64(len(text)) {
+		return len(text)
+	}
+	off := int(offset)
+	for off > 0 && !utf8.RuneStart(text[off]) {
+		off--
+	}
+	return off
+}
+
+// docFind is the byte position where a find match's line starts (not before offset): the
+// first Markdown ATX heading line with a case-insensitive match at or after offset, else
+// the first match anywhere at or after offset. It is -1 without a match.
+func docFind(text string, offset int, find string) int {
+	first := -1
+	for pos := offset; pos <= len(text); {
+		m := docIndexFold(text[pos:], find)
+		if m < 0 {
+			break
+		}
+		m += pos
+		lineStart := strings.LastIndexByte(text[:m], '\n') + 1
+		if first < 0 {
+			first = max(lineStart, offset)
+		}
+		lineEnd := len(text)
+		if nl := strings.IndexByte(text[m:], '\n'); nl >= 0 {
+			lineEnd = m + nl
+		}
+		if docHeading(text[lineStart:lineEnd]) {
+			return max(lineStart, offset)
+		}
+		pos = lineEnd + 1
+	}
+	return first
+}
+
+func docHeading(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return false
+	}
+	line = trimmed
+	n := 0
+	for n < len(line) && line[n] == '#' {
+		n++
+	}
+	return n >= 1 && n <= 6 && (n == len(line) || line[n] == ' ' || line[n] == '\t' || line[n] == '\r')
+}
+
+// docIndexFold is the byte index of the first case-insensitive match of sub in s.
+func docIndexFold(s, sub string) int {
+	runes := utf8.RuneCountInString(sub)
+	for i := 0; i < len(s); {
+		end := i
+		for k := 0; k < runes && end < len(s); k++ {
+			_, size := utf8.DecodeRuneInString(s[end:])
+			end += size
+		}
+		if strings.EqualFold(s[i:end], sub) {
+			return i
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+	}
+	return -1
 }
 
 // docEscape is URI.encode with only the unreserved characters kept: everything else
@@ -503,12 +660,14 @@ func docFit(r docResult) docResult { return Documentation{}.fit(r) }
 func (d Documentation) fit(r docResult) docResult {
 	limit, _ := d.bounds()
 	for left := 24; ; left-- {
+		r.derive()
 		if left == 0 {
-			r.Body = ""
-			if r.Untrusted {
-				r.Body = docMarker
+			r.Body, r.Synth = "", 0
+			if r.Untrusted && r.Status != "not_found" {
+				r.Body, r.Synth = docMarker, len(docMarker)
 			}
 			r.Sources, r.Truncated = nil, true
+			r.derive()
 			if d.ResultBound != 0 {
 				r = docFitMetadata(r, limit)
 			}
@@ -523,8 +682,12 @@ func (d Documentation) fit(r docResult) docResult {
 			r.Truncated = true
 		case len(r.Body) > 0:
 			body := validPrefix(r.Body[:len(r.Body)/2])
+			if r.Synth > len(body) {
+				r.Synth = len(body)
+			}
 			if r.Untrusted && !strings.Contains(body, docMarker) {
 				body = docMarker + body
+				r.Synth += len(docMarker)
 			}
 			r.Body, r.Truncated = body, true
 		default:
