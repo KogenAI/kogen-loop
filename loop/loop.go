@@ -32,7 +32,7 @@ type Request struct {
 	Input        []any // Responses-style input items
 	Tools        []any // model-facing tool definitions, sent verbatim
 	// DisableParallelToolCalls asks the provider not to generate parallel tool calls; a batch
-	// that is returned is still executed in full.
+	// that is returned is still executed in full unless Round.StopAfterTerminal is set.
 	DisableParallelToolCalls bool
 }
 
@@ -214,7 +214,16 @@ type Round struct {
 	// TerminalReminders permits that many reminder continuations per Run after a response
 	// without a tool call; nonpositive keeps ending such a round with EndNoCall.
 	TerminalReminders int
+	// StopAfterTerminal (default false) makes the first terminal of a batch the Result.Terminal
+	// and answers every later call of that batch with SkippedAfterTerminal instead of running it
+	// (BeforeCall and AfterCall still observe it, with terminal false). False keeps the last
+	// terminal and runs every call.
+	StopAfterTerminal bool
 }
+
+// SkippedAfterTerminal is the output of a call skipped because Round.StopAfterTerminal ended
+// the round at an earlier terminal call of the same batch.
+const SkippedAfterTerminal = "skipped: earlier terminal call ended the round"
 
 // Ending is how a round ended. Both endings are model claims.
 type Ending string
@@ -227,7 +236,7 @@ const (
 // Result is a finished round.
 type Result struct {
 	Ending   Ending
-	Terminal *tools.Call        // last terminal call of the final batch (EndTerminal only), as Kogen's builder keeps
+	Terminal *tools.Call        // last terminal call of the final batch, or the first with StopAfterTerminal (EndTerminal only)
 	Input    []any              // conversation after the round: sent input + replayed response items + outputs of non-terminal calls
 	Response *provider.Response // last response
 	Requests int                // requests sent in this round
@@ -246,10 +255,12 @@ var DefaultTerminal = []string{"finish"}
 //     is marked terminal (the last one wins) and is not executed; otherwise HandleCall when it
 //     handles the call, else Tools.CallContext(ctx, call) and Output.Cut; AfterCall(call, out, terminal,
 //     input ++ outs); append call.Output(out) to outs unless the call is terminal.
+//     With Round.StopAfterTerminal the first terminal wins and each later call is answered with
+//     SkippedAfterTerminal without execution or HandleCall (BeforeCall/AfterCall still run).
 //  6. No terminal call and at least one call: input = input ++ outs and go to 1.
 //  7. Otherwise return the Result.
 //
-// Calls after a terminal call in the same batch still run. A hook error, a tool interrupt
+// Unless Round.StopAfterTerminal is set, calls after a terminal call in the same batch still run. A hook error, a tool interrupt
 // (a shell stopped by the caller), timeout observation failure or a cancelled context
 // stops the round; the error is
 // returned unchanged. When ctx ends, every process group started through rd.Tools.Session
@@ -311,7 +322,11 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 			}
 			var out tools.Output
 			isTerminal := slices.Contains(terminal, call.Name)
-			if !isTerminal {
+			skip := rd.StopAfterTerminal && last != nil
+			if skip {
+				isTerminal = false
+				out = tools.Output{Text: SkippedAfterTerminal}
+			} else if !isTerminal {
 				handled := false
 				if h.HandleCall != nil {
 					hd, err := h.HandleCall(ctx, call)

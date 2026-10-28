@@ -86,6 +86,7 @@ type Round struct {
     Definitions  []any        // tool definitions sent to the model
     Tools        *tools.Tools // executes non-handled calls (enabled set, protected/excluded paths)
     Terminal     []string     // names that end the round without execution; default ["finish"]
+    StopAfterTerminal bool    // library-only; default false (see "Stop after terminal")
 }
 
 type Ending string
@@ -97,7 +98,7 @@ const (
 
 type Result struct {
     Ending   Ending
-    Terminal *tools.Call        // last terminal call of the final batch (EndTerminal only)
+    Terminal *tools.Call        // last terminal call of the final batch (EndTerminal only); the first with StopAfterTerminal
     Input    []any              // conversation after the round: sent input + replayed response items + outputs of non-terminal calls
     Response *provider.Response // last response
     Requests int                // requests sent in this round
@@ -115,7 +116,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (Res
 5. For each call, in order:
    1. Return `ctx.Err()` if it's set.
    2. `BeforeCall(call, input ++ outs)`.
-   3. If the name is in `Terminal`, mark it terminal and don't execute it. When a batch has several terminal calls, the **last** one is `Result.Terminal`, as Kogen's builder keeps it; earlier ones stay unanswered.
+   3. If the name is in `Terminal`, mark it terminal and don't execute it. When a batch has several terminal calls, the **last** one is `Result.Terminal`, as Kogen's builder keeps it; earlier ones stay unanswered. With `StopAfterTerminal` the first terminal wins and later calls are skipped (see "Stop after terminal").
    4. Otherwise take `HandleCall` if it's set and handled; if not, `out, err := Tools.CallContext(ctx, call)` and use `Tools.Cut(out)` (configured budgets; `out.Cut()` when `Tools` is nil). Intercepted `HandleCall` output stays host-owned and is not cut. `err` is returned unchanged as a stop for shell interruption, context cancellation/deadline during positive-timeout custody, or timeout observation failure.
    5. `AfterCall(call, out, terminal, input ++ outs)`.
    6. Append `call.Output(out)` to `outs` unless the call is terminal.
@@ -134,6 +135,10 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - `Hooks.Progress func(ctx, round int) (string, error)`: nil disables the no-progress stop. It is called after each round that did not end, with the 1-based round number, and returns a progress fingerprint. An error stops the run and is returned unchanged.
 - `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
 - Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
+
+### Stop after terminal (Go library)
+
+`Round.StopAfterTerminal bool` is an opt-in library option; no task field, CLI flag, session setting or event change exists. The default `false` keeps the behavior above byte for byte: every call in a batch runs and the last terminal wins. When `true`, the first terminal (a name in the effective `Terminal` list or a terminal returned by `HandleCall`) becomes `Result.Terminal`. Every later call in that batch, including later terminal names, is not executed and `HandleCall` is not invoked; it receives an ordinary non-terminal output with the exact text `skipped: earlier terminal call ended the round` (`loop.SkippedAfterTerminal`), and one `call.Output` per skipped call is appended to the transcript. The chosen terminal keeps the no-output semantics. `BeforeCall` and `AfterCall` still run for skipped calls (`AfterCall` gets the skip output and `terminal=false`), so event-producing hooks count them as ordinary calls and results. Cancellation and hook errors keep their precedence. With no terminal, all calls run as usual.
 
 ### Terminal reminders (Go library)
 
@@ -168,7 +173,7 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - True on the Responses wire (ChatGPT, SuperGrok) renders `parallel_tool_calls: false`, also with no tools. True on the Messages wire (Anthropic) renders `tool_choice.disable_parallel_tool_use: true` beside the existing choice `type`; with no tools no `tool_choice` is created.
 - Support follows the effective wire after profile resolution, not the provider name. A Chat Completions route (OpenCode Go, OpenAI-compatible) refuses true before any transport with a provider `unsupported_capability` error naming parallel tool calls and the route.
 - A provider rejection is returned as an honest error; the request is not silently retried without the control.
-- Batch semantics are unchanged: every call returned in a batch is still executed, including calls after a terminal call. The option asks the provider to generate fewer parallel calls; it does not truncate a batch. Replay, usage, cache placement, retries and credentials are unchanged.
+- Batch semantics are unchanged: every call returned in a batch is still executed (unless `StopAfterTerminal` is set), including calls after a terminal call. The option asks the provider to generate fewer parallel calls; it does not truncate a batch. Replay, usage, cache placement, retries and credentials are unchanged.
 
 ### Authority cache breakpoint (Go library, Messages wire)
 
