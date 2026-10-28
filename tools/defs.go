@@ -112,9 +112,13 @@ func Definition(name string) (map[string]any, bool) {
 }
 
 // Definition returns a generic definition matching this Tools configuration.
-// CompactDescriptions and a positive ShellTimeout affect descriptions only. Callers pass these
+// OmitViewImage suppresses view_image. CompactDescriptions and a positive ShellTimeout
+// affect descriptions only. Callers pass these
 // definitions and the same Tools instance to Round; package defaults stay unbounded.
 func (t *Tools) Definition(name string) (map[string]any, bool) {
+	if t.OmitViewImage && name == ViewImageTool {
+		return nil, false
+	}
 	d, ok := Definition(name)
 	if !ok {
 		return d, false

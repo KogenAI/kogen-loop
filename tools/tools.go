@@ -115,6 +115,8 @@ type Tools struct {
 	Session *sys.Session
 	// CompactDescriptions selects shorter model-facing descriptions from Definition.
 	CompactDescriptions bool
+	// OmitViewImage removes view_image from instance definitions and execution. Default false.
+	OmitViewImage bool
 	// ShellTimeout bounds each shell invocation independently. Nonpositive means no limit.
 	ShellTimeout time.Duration
 	// Repo runs the Git commands of list_files and search_text and the candidate tree of
@@ -155,7 +157,7 @@ func (t *Tools) Run(name string, args map[string]any) (Output, error) {
 // RunContext runs a call, forwarding ctx only for positive ShellTimeout custody.
 // Overall execution custody remains the caller's responsibility.
 func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any) (Output, error) {
-	if !slices.Contains(t.Enabled, name) {
+	if !slices.Contains(t.Enabled, name) || (t.OmitViewImage && name == ViewImageTool) {
 		return Output{Text: "error: unknown tool " + name}, nil
 	}
 	switch name {

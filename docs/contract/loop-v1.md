@@ -233,6 +233,32 @@ r := loop.Round{Tools: t, Definitions: []any{read, shell}}
 This library option adds no CLI or task setting. It reduces serialized definition
 bytes; it does not claim measured provider token savings or tool-call error rates.
 
+### Omit view_image (Go tools only)
+
+`tools.Tools.OmitViewImage` is an opt-in boolean, false by default. When true,
+the instance's `Definition(tools.ViewImageTool)` returns `(nil, false)`, and
+execution returns `error: unknown tool view_image` even if `Enabled` includes it.
+Other definitions and execution are unchanged. Package `tools.Definition` and
+`tools.Defs` remain unchanged and still expose `view_image`. Assemble definitions
+by retaining successful instance results in the desired order and use that same
+instance for execution:
+
+```go
+names := []string{tools.ReadFileTool, tools.ViewImageTool, tools.ShellTool}
+t := &tools.Tools{Root: root, Enabled: names, OmitViewImage: true}
+var definitions []any
+for _, name := range names {
+    if def, ok := t.Definition(name); ok {
+        definitions = append(definitions, def)
+    }
+}
+r := loop.Round{Tools: t, Definitions: definitions}
+// Supply the round's other caller-owned fields as usual.
+```
+
+The engine does not filter caller-supplied definitions. This library-only option
+adds no CLI flag, task field, environment setting or capability.
+
 ### Caller-owned shell duration (Go tools only)
 
 `tools.Tools` adds `ShellTimeout time.Duration`. Nonpositive values are off;
