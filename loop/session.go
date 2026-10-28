@@ -62,10 +62,12 @@ type SessionConfig struct {
 	Protected    []string // write_file refuses these paths (prevention only; not detection)
 	Excluded     []string
 	Terminal     []string // default ["finish"]
-	Dir          string   // transcript directory ("" = in memory)
-	Client       *provider.Client
-	Session      *sys.Session
-	Emit         func(api.Event) // event sink (nil: discard)
+	// TerminalReminders is Round.TerminalReminders (Go only; no task or CLI setting).
+	TerminalReminders int
+	Dir               string // transcript directory ("" = in memory)
+	Client            *provider.Client
+	Session           *sys.Session
+	Emit              func(api.Event) // event sink (nil: discard)
 }
 
 // Session is a standalone multi-round conversation with optional transcript persistence. It
@@ -275,7 +277,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	s.requests = 0
 	rd := Round{
 		Owner: "loop", Role: s.cfg.Role, Instructions: s.instructions, Definitions: s.defs,
-		Tools: s.tools, Terminal: s.terminal,
+		Tools: s.tools, Terminal: s.terminal, TerminalReminders: s.cfg.TerminalReminders,
 	}
 	hooks := Hooks{
 		BeforeRequest: func(ctx context.Context, in []any) error {
@@ -293,6 +295,10 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 				id = resp.ID
 			}
 			s.emit(api.EventResponse, map[string]any{"n": s.requests, "response_id": id, "usage": u})
+			return nil
+		},
+		TerminalReminder: func(ctx context.Context, n int, names []string) error {
+			s.emit(api.EventTerminalReminder, map[string]any{"reminder": n, "terminal_tools": slices.Clone(names)})
 			return nil
 		},
 		BeforeCall: func(ctx context.Context, call tools.Call, in []any) error {

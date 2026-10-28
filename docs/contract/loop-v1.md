@@ -135,6 +135,15 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
 - Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
 
+### Terminal reminders (Go library)
+
+`Round.TerminalReminders int` (and `SessionConfig.TerminalReminders`) is an opt-in library option; no task JSON field or CLI flag exists and there is no default. Nonpositive keeps today's behavior: a response without a tool call ends the round with `EndNoCall`. A positive value permits that many reminder continuations per `Run` (the count resets on every `Run`, including each Session turn), only after a response with no tool call and no terminal. A terminal call, including an intercepted one, ends the round immediately. When the budget is spent the round ends with `EndNoCall` normally.
+
+- The reminder is one appended user message after the replayed response: `Call one of these terminal tools to end this round: ` followed by the effective `Terminal` names (default `finish`) in configured order joined with `, ` and a final `.`. Any listed terminal satisfies it.
+- `Hooks.TerminalReminder func(ctx, reminder int, terminals []string) error` is called once per appended reminder, before the next request, with the 1-based number and the terminal names; an error stops the run and is returned unchanged.
+- Reminder continuations obey `Progress` and `MaxRounds` (checked as for a continuing round, counters not reset); if a stop wins, no reminder is appended or announced. Further requests count in `Result.Requests`.
+- `Session` emits `round.terminal_reminder` with `reminder` (1-based) and `terminal_tools` (ordered array) through its sequenced event sink for each reminder.
+
 ### Input window budget (Go library)
 
 `InputBudgetBytes int` on `loop.FailOverBudget` and `loop.Direct` is a library-only lower-only option: no task JSON field, CLI flag or `SessionConfig` option exists. Zero keeps today's inclusive 524288-byte ceiling. A nonzero value must be in [65536, 524288]; negatives and out-of-range values return `loop/invalid_task` (exit 2) naming `InputBudgetBytes` and the range, before anything is sent. `FailOverBudget.Prepare` and `Direct`'s default-policy route validate it.

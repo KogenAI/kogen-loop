@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"kogen-loop/api"
 	"kogen-loop/provider"
@@ -171,6 +172,10 @@ type Hooks struct {
 	// round number and returns a progress fingerprint. nil disables the no-progress stop;
 	// there is no default. An error stops the run and is returned unchanged.
 	Progress func(ctx context.Context, round int) (string, error)
+	// TerminalReminder is called once for each reminder Round.TerminalReminders appends, before
+	// the next request, with the 1-based reminder number and the effective terminal names. An
+	// error stops the run and is returned unchanged.
+	TerminalReminder func(ctx context.Context, reminder int, terminals []string) error
 }
 
 // NoProgressRounds is the number of consecutive identical Progress fingerprints that stop a
@@ -206,6 +211,9 @@ type Round struct {
 	Terminal                 []string     // names that end the round without execution; default ["finish"]
 	DisableParallelToolCalls bool         // ask the provider for one tool call per response; unsupported routes refuse
 	MaxRounds                int          // stop with RoundLimitError after this many requests when the round would continue; 0 is no limit (no default)
+	// TerminalReminders permits that many reminder continuations per Run after a response
+	// without a tool call; nonpositive keeps ending such a round with EndNoCall.
+	TerminalReminders int
 }
 
 // Ending is how a round ended. Both endings are model claims.
@@ -262,7 +270,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 	if rd.Tools != nil && rd.Tools.Session != nil {
 		defer custody(ctx, rd.Tools.Session)()
 	}
-	requests := 0
+	requests, reminders := 0, 0
 	var streak []int
 	var fingerprint string
 	for {
@@ -354,7 +362,8 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		if last == nil && len(calls) > 0 {
+		remind := last == nil && len(calls) == 0 && reminders < rd.TerminalReminders
+		if last == nil && (len(calls) > 0 || remind) {
 			input = slices.Concat(input, outs)
 			stop := Result{Input: input, Response: resp, Requests: requests}
 			if h.Progress != nil {
@@ -371,8 +380,25 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 					return stop, &NoProgressError{Rounds: streak, Fingerprint: fp}
 				}
 			}
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
 			if rd.MaxRounds > 0 && requests >= rd.MaxRounds {
 				return stop, &RoundLimitError{Rounds: requests}
+			}
+			if remind {
+				reminders++
+				if h.TerminalReminder != nil {
+					if err := h.TerminalReminder(ctx, reminders, slices.Clone(terminal)); err != nil {
+						return Result{}, err
+					}
+				}
+				if err := ctx.Err(); err != nil {
+					return Result{}, err
+				}
+				input = slices.Concat(input, []any{map[string]any{
+					"role": "user", "content": "Call one of these terminal tools to end this round: " + strings.Join(terminal, ", ") + ".",
+				}})
 			}
 			continue
 		}
