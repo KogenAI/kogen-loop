@@ -178,8 +178,8 @@ func (c *Client) Body(req Request) map[string]any {
 
 // Respond sends one request and returns the validated answer. Provider failures are
 // *sys.Error (class provider, exit 4, reason context_too_long when the conversation no
-// longer fits); an interrupt is *sys.Interrupted. One logical call has a fixed 30-minute
-// budget shared by credentials, refresh, retries and backoff (GPT-8).
+// longer fits); an interrupt is *sys.Interrupted. One logical call has a 30-minute
+// budget (lowerable by Client.ResponseBudget and Request.Budget) shared by credentials, refresh, retries and backoff (GPT-8).
 func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs Observer) (*Response, error) {
 	info, ok := Lookup(req.Role.Provider)
 	if !ok {
@@ -189,6 +189,12 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 		return nil, err
 	}
 	budget := ResponseBudget
+	if c.ResponseBudget != 0 {
+		if c.ResponseBudget < time.Second || c.ResponseBudget > ResponseBudget {
+			return nil, sys.Fail("provider", "refused", "response budget must be zero or between 1s and 30m0s", 4)
+		}
+		budget = c.ResponseBudget
+	}
 	if req.Budget > 0 && req.Budget < budget {
 		budget = req.Budget
 	}
@@ -197,6 +203,9 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 	}
 	k := c.newCall(ctx, s, info, budget)
 	defer k.cancel()
+	if c.ResponseBudget != 0 {
+		k.expiry = budget.String()
+	}
 	k.baseURL = strings.TrimRight(req.Role.BaseURL, "/")
 	cache := c.cacheFor(req)
 	key, st := cache.resolve(req)

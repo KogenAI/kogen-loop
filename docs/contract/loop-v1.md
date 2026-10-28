@@ -143,6 +143,14 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - A non-nil `Direct.Policy` entirely owns policy: `Direct.InputBudgetBytes`, even invalid, is ignored there.
 - The provider's own hard ceiling is unchanged.
 
+### Client response budget (Go library)
+
+`provider.Client.ResponseBudget time.Duration` is a library-only lower-only option: no CLI flag, task field or provider protocol change exists. The unit is a Go `time.Duration`. Zero keeps the package constant `provider.ResponseBudget` (30 minutes), with unchanged wire bytes, diagnostics and retry behavior. A nonzero value must be in the inclusive range 1 second through 30 minutes; `Respond` refuses anything else before credentials, network traffic or backoff with `*sys.Error` (class `provider`, reason `refused`, exit 4, detail `response budget must be zero or between 1s and 30m0s`).
+
+- Precedence: the effective logical-call budget is the client value (30 minutes for zero), shortened by an existing positive `Request.Budget` when that is smaller. `Request.Budget` keeps its semantics (subsecond values allowed, values above the ceiling clamped; the 1-second minimum applies to the client option only) and can neither raise the client ceiling nor bypass invalid client validation.
+- The budget stays absolute: it covers credential waits, refresh, transport, stream reads, retry backoff and retries; bytes and heartbeats never renew it. No retry is added.
+- Expiry uses the existing path: `provider/unavailable`, exit 4, provider-labelled. With `ResponseBudget` zero the detail is exactly `response wait exceeded 30 minutes` (also when `Request.Budget` shortens the wait). With a nonzero value the detail is `response wait exceeded ` plus the effective budget as `time.Duration.String()`, including a smaller `Request.Budget`: for example `response wait exceeded 10m0s`, `30m0s` for an explicit 30 minutes, `2s`.
+
 ### Disabling parallel tool calls (Go library)
 
 `DisableParallelToolCalls bool` on `loop.Round`, `loop.Request` and `provider.Request` is a library-only research option: no task JSON field or CLI flag exists. `Run` copies it from `Round` into every `Request`; `Direct` transmits it and `FailOverBudget` measures the same configured body.
