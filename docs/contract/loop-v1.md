@@ -135,6 +135,14 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
 - Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
 
+### Input window budget (Go library)
+
+`InputBudgetBytes int` on `loop.FailOverBudget` and `loop.Direct` is a library-only lower-only option: no task JSON field, CLI flag or `SessionConfig` option exists. Zero keeps today's inclusive 524288-byte ceiling. A nonzero value must be in [65536, 524288]; negatives and out-of-range values return `loop/invalid_task` (exit 2) naming `InputBudgetBytes` and the range, before anything is sent. `FailOverBudget.Prepare` and `Direct`'s default-policy route validate it.
+
+- The complete rendered request (instructions, tools, cache placement, parallel-call control) is measured inclusively, as today. The effective ceiling is the minimum of the configured-or-default budget and the role/family bound; the output reserve, unchanged input on success, `loop/context_budget_exceeded` refusal and message format (with the effective ceiling) are unchanged. Refusals send nothing and nothing is clipped. Caller instructions/tools larger than the budget are refused, not clipped.
+- A non-nil `Direct.Policy` entirely owns policy: `Direct.InputBudgetBytes`, even invalid, is ignored there.
+- The provider's own hard ceiling is unchanged.
+
 ### Disabling parallel tool calls (Go library)
 
 `DisableParallelToolCalls bool` on `loop.Round`, `loop.Request` and `provider.Request` is a library-only research option: no task JSON field or CLI flag exists. `Run` copies it from `Round` into every `Request`; `Direct` transmits it and `FailOverBudget` measures the same configured body.

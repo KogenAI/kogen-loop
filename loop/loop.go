@@ -60,10 +60,22 @@ type FailOverBudget struct {
 	Client  *provider.Client
 	Cache   *provider.Cache
 	CacheID string
+
+	// InputBudgetBytes lowers the input ceiling. Zero keeps the default (524288); otherwise it
+	// must be in [MinInputBudgetBytes, tools.InputBudgetBytes]. It never raises the role's bound.
+	InputBudgetBytes int
 }
+
+// MinInputBudgetBytes is the smallest nonzero FailOverBudget.InputBudgetBytes.
+const MinInputBudgetBytes = 65536
 
 // Prepare returns r.Input unchanged when the request fits.
 func (p FailOverBudget) Prepare(ctx context.Context, r Request) ([]any, error) {
+	if b := p.InputBudgetBytes; b != 0 && (b < MinInputBudgetBytes || b > tools.InputBudgetBytes) {
+		return nil, sys.Fail(api.ErrClassLoop, api.ErrInvalidTask, fmt.Sprintf(
+			"InputBudgetBytes %d is invalid: must be 0 (default) or in [%d, %d]",
+			b, MinInputBudgetBytes, tools.InputBudgetBytes), 2)
+	}
 	if _, ok := provider.Lookup(r.Role.Provider); !ok {
 		// Respond refuses an unknown provider with its own error; there is nothing to measure.
 		return r.Input, nil
@@ -80,10 +92,14 @@ func (p FailOverBudget) Prepare(ctx context.Context, r Request) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !m.Fits {
+	limit := m.InputBudgetBytes
+	if p.InputBudgetBytes != 0 && p.InputBudgetBytes < limit {
+		limit = p.InputBudgetBytes
+	}
+	if m.RenderedBytes > limit {
 		return nil, sys.Fail(api.ErrClassLoop, api.ErrContextBudget, fmt.Sprintf(
 			"%s: complete next request %d bytes exceeds %d; reserve %d tokens. Nothing was sent and nothing was clipped.",
-			ownerLabel(r.Owner), m.RenderedBytes, m.InputBudgetBytes, m.OutputReserveTokens), 1)
+			ownerLabel(r.Owner), m.RenderedBytes, limit, m.OutputReserveTokens), 1)
 	}
 	return r.Input, nil
 }
@@ -104,6 +120,10 @@ type Direct struct {
 	Observer provider.Observer // nil: none
 	CacheID  string            // one cache identity per conversation (kept across rounds)
 	Cache    *provider.Cache
+
+	// InputBudgetBytes is passed to the default FailOverBudget only; a non-nil Policy owns
+	// policy and this field (even invalid) is ignored.
+	InputBudgetBytes int
 }
 
 // Request applies the policy, then sends the request with provider.Client.Respond. It
@@ -111,7 +131,8 @@ type Direct struct {
 func (d *Direct) Request(ctx context.Context, r Request) (*provider.Response, []any, error) {
 	policy := d.Policy
 	if policy == nil {
-		policy = FailOverBudget{Client: d.Client, Cache: d.Cache, CacheID: d.CacheID}
+		policy = FailOverBudget{Client: d.Client, Cache: d.Cache, CacheID: d.CacheID,
+			InputBudgetBytes: d.InputBudgetBytes}
 	}
 	sent, err := policy.Prepare(ctx, r)
 	if err != nil {
