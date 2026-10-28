@@ -116,7 +116,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (Res
    1. Return `ctx.Err()` if it's set.
    2. `BeforeCall(call, input ++ outs)`.
    3. If the name is in `Terminal`, mark it terminal and don't execute it. When a batch has several terminal calls, the **last** one is `Result.Terminal`, as Kogen's builder keeps it; earlier ones stay unanswered.
-   4. Otherwise take `HandleCall` if it's set and handled; if not, `out, err := Tools.CallContext(ctx, call)` and use `out.Cut()`. `err` is returned unchanged as a stop for shell interruption, context cancellation/deadline during positive-timeout custody, or timeout observation failure.
+   4. Otherwise take `HandleCall` if it's set and handled; if not, `out, err := Tools.CallContext(ctx, call)` and use `Tools.Cut(out)` (configured budgets; `out.Cut()` when `Tools` is nil). Intercepted `HandleCall` output stays host-owned and is not cut. `err` is returned unchanged as a stop for shell interruption, context cancellation/deadline during positive-timeout custody, or timeout observation failure.
    5. `AfterCall(call, out, terminal, input ++ outs)`.
    6. Append `call.Output(out)` to `outs` unless the call is terminal.
 6. If no call is terminal and `len(calls) > 0`, set `input = input ++ outs` and go to step 1.
@@ -419,3 +419,7 @@ Kogen-side synchronization and pin updates remain outside this component's scope
 - `requires` refusal;
 - transcript resume and mismatch refusal;
 - usage `unknown` preserved as `null`.
+
+## Tool result cut budgets (Go tools only)
+
+`tools.Tools.ResultBound` and `ResultHead` (library only, no CLI/task setting) set the engine's result cut. Zero independently defaults to 16384 and 4096. `tools.New(options Tools) (*Tools, error)` and `(*Tools).Validate()` refuse a negative field, a resolved bound below 128, a resolved head at or above the bound, and fewer than 64 bytes remaining after the head for the marker and tail; the error names the option. `loop.Run` validates `Round.Tools` before executing any tool and returns the error. `(*Tools).Cut(Output) Output` keeps a UTF-8-safe head and tail around an `\n[... N bytes omitted ...]\n` marker counting the bytes actually absent, total at most the bound; fitting text is verbatim, cutting is idempotent, typed Output passes unchanged. Package `Cut(string)` and `Output.Cut()` are the exact default wrappers. `Run`/`Call` return raw results; the engine applies the cut where it delivers a result it executed. Standalone sessions, replay, definitions and typed images are unchanged.

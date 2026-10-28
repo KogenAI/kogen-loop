@@ -250,6 +250,11 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if rd.Tools != nil {
+		if err := rd.Tools.Validate(); err != nil {
+			return Result{}, err
+		}
+	}
 	terminal := rd.Terminal
 	if len(terminal) == 0 {
 		terminal = DefaultTerminal
@@ -322,7 +327,11 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 						}
 						out = o
 					}
-					out = out.Cut()
+					if rd.Tools != nil {
+						out = rd.Tools.Cut(out)
+					} else {
+						out = out.Cut()
+					}
 				}
 			}
 			// A tool can return after custody has terminated its process group.
