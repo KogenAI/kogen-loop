@@ -65,10 +65,13 @@ func New(options Tools) (*Tools, error) {
 	return &options, nil
 }
 
-// Validate checks ResultBound and ResultHead: negatives are refused, the resolved bound
+// Validate checks the nested Documentation options, then ResultBound and ResultHead: negatives are refused, the resolved bound
 // must be at least 128, the resolved head below it, and at least 64 bytes must remain
 // after the head for the marker and tail.
 func (t *Tools) Validate() error {
+	if err := t.Documentation.Validate(); err != nil {
+		return err
+	}
 	if t.ResultBound < 0 {
 		return fmt.Errorf("tools: ResultBound %d is negative", t.ResultBound)
 	}
