@@ -17,7 +17,7 @@ Neither surface knows Kogen's approval, Intent, baseline, verification, review, 
   - tool result texts and the 16384-byte cut;
   - replay items;
   - request bodies, cache identity placement, retry and stream accumulation.
-  The adopted golden tests guard these compatibility bytes. The library-only positive `Tools.ShellTimeout` opt-in changes only its configuration-aware shell description and expired-command feedback as specified below; zero retains the original bytes.
+  The adopted golden tests guard these compatibility bytes. The library-only positive `Tools.ShellTimeout` opt-in changes only its configuration-aware shell description and expired-command feedback as specified below; zero retains the original bytes. The library-only `Tools.CompactDescriptions` opt-in changes descriptions as specified below; false retains the full descriptions.
 - **L3 No hidden fallback.** No provider, route, key or model substitution and no extra retries beyond the provider policy moved from Kogen (3 transport attempts, one unreadable-answer retry, one refresh after a 401 for sign-in routes). Refusals are reported honestly.
 - **L4 Unknown stays unknown.** Usage comes from provider-reported fields only. Missing values are `null` and the usage `state` is `partial` or `unknown`. Nothing is estimated.
 - **L5 Credentials.** The loop reads the existing store at `$HOME/.kogen/credentials/<provider>.json` (same format, 0600) with the same login/refresh behavior. It never prints, copies, proxies or exports tokens. Signing in remains the caller's job (`kogen provider login …`, or `provider.Login` for library callers).
@@ -212,6 +212,27 @@ round end. A blocking PreToolUse hook on the `Bash` matcher using `ForeignKill` 
 possible but unverified and belongs to a separate item, K-SAFE-2. Kogen cannot see or
 stop what `claude` runs between hooks, or processes that leave the group.
 
+### Compact tool descriptions (Go tools only)
+
+`tools.Tools.CompactDescriptions` opts in to shorter descriptions from the
+instance's `Definition` method; its zero value retains full descriptions.
+Schemas and tool execution are unchanged. Package `tools.Definition` and
+`tools.Defs` always return full descriptions. A positive `ShellTimeout` is
+reflected in the instance's compact shell description too. Build the request's
+definitions with the same configured instance used for execution:
+
+```go
+t := &tools.Tools{Root: root, Enabled: []string{tools.ReadFileTool, tools.ShellTool},
+    CompactDescriptions: true}
+read, _ := t.Definition(tools.ReadFileTool)
+shell, _ := t.Definition(tools.ShellTool)
+r := loop.Round{Tools: t, Definitions: []any{read, shell}}
+// Supply the round's other caller-owned fields as usual.
+```
+
+This library option adds no CLI or task setting. It reduces serialized definition
+bytes; it does not claim measured provider token savings or tool-call error rates.
+
 ### Caller-owned shell duration (Go tools only)
 
 `tools.Tools` adds `ShellTimeout time.Duration`. Nonpositive values are off;
@@ -221,10 +242,11 @@ environment setting, capability entry or automatic default is added.
 `deadline_seconds` remains the standalone whole-round stopping deadline.
 
 `func (t *Tools) Definition(name string) (map[string]any, bool)` returns the
-package definition/unknown-name behavior unchanged except for shell with a
-positive bound. It replaces only `Commands have no time limit.` with
+package definition/unknown-name behavior unchanged by default except for shell with a
+positive bound. In full mode it replaces only `Commands have no time limit.` with
 `Each shell call has a caller-configured time limit of <duration>. A timed-out command's process group is stopped before a timed-out result is returned.`
-where `<duration>` is Go `time.Duration.String()`. Command-only parameters,
+where `<duration>` is Go `time.Duration.String()`. Compact mode instead states the
+same bound and group teardown in shorter text. Command-only parameters,
 required arguments and `additionalProperties` stay unchanged. Repeated generation
 is stable and does not mutate earlier definitions or package defaults.
 `tools.Definition` and `tools.Defs` remain unbounded and byte-identical.

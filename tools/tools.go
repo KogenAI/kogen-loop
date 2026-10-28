@@ -111,6 +111,8 @@ type Tools struct {
 	// Session runs shell commands (the caller's environment, interrupts) and gives Git its
 	// environment. Nil: this process's environment, no interrupts.
 	Session *sys.Session
+	// CompactDescriptions selects shorter model-facing descriptions from Definition.
+	CompactDescriptions bool
 	// ShellTimeout bounds each shell invocation independently. Nonpositive means no limit.
 	ShellTimeout time.Duration
 	// Repo runs the Git commands of list_files and search_text and the candidate tree of
