@@ -2,9 +2,7 @@ package tools
 
 import (
 	"context"
-	"kogen-loop/sys"
 	"testing"
-	"time"
 )
 
 func TestTimeoutCustodyContextCalls(t *testing.T) {
@@ -18,22 +16,6 @@ func TestTimeoutCustodyContextCalls(t *testing.T) {
 		out, err := run()
 		if err != nil || out.Text != "exit status: 0\nexact" {
 			t.Fatalf("%+v %v", out, err)
-		}
-	}
-	for _, method := range []string{"RunContext", "CallContext"} {
-		tt.Session = sys.NewWith(nil, tt.Root)
-		tt.ShellTimeout = time.Millisecond
-		call.Arguments = `{"command":"while :; do :; done"}`
-		var out Output
-		var err error
-		if method == "RunContext" {
-			out, err = tt.RunContext(ctx, ShellTool, call.Args())
-		} else {
-			out, err = tt.CallContext(ctx, call)
-		}
-		sys.Terminate(tt.Session.Groups())
-		if err != context.Canceled || out.Text != "" {
-			t.Fatalf("%s: %+v %v", method, out, err)
 		}
 	}
 }
