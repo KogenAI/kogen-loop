@@ -72,9 +72,18 @@ type Observer interface{ Attempt(record map[string]any) }
 
 var seamPattern = regexp.MustCompile(`^http://(127\.0\.0\.1|localhost):[0-9]+$`)
 
+// ErrMissingSession is the validation error of a request made without a Session: it is
+// refused before any credential is read or any request is sent.
+func ErrMissingSession() *sys.Error {
+	return sys.Fail("validation", "missing_session", "Session is required", 2)
+}
+
 // CheckSeams refuses a KOGEN_PROVIDER_URL or KOGEN_AUTH_URL that is not a loopback
 // http origin (GPT-11): environment/invalid_test_seam, exit 3.
 func CheckSeams(s *sys.Session) error {
+	if s == nil {
+		return ErrMissingSession()
+	}
 	for _, name := range []string{"KOGEN_PROVIDER_URL", "KOGEN_AUTH_URL"} {
 		if v, ok := s.LookupEnv(name); ok && !seamPattern.MatchString(v) {
 			return sys.Fail("environment", "invalid_test_seam", name+" must be http://127.0.0.1:<port> or http://localhost:<port>", 3)
@@ -178,6 +187,9 @@ func (c *Client) Body(req Request) map[string]any {
 // longer fits); an interrupt is *sys.Interrupted. One logical call has a 30-minute
 // budget (lowerable by Client.ResponseBudget) shared by credentials, refresh, retries and backoff (GPT-8).
 func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs Observer) (*Response, error) {
+	if s == nil {
+		return nil, ErrMissingSession()
+	}
 	info, ok := Lookup(req.Role.Provider)
 	if !ok {
 		return nil, sys.Fail("provider", "refused", "unknown provider "+req.Role.Provider, 4)
