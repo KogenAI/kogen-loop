@@ -47,61 +47,6 @@ func (o Output) Cut() Output {
 	return Output{Text: Cut(o.Text)}
 }
 
-// Cut applies this instance's configured budgets (ResultBound, ResultHead) to a text
-// output; typed parts pass unchanged. The receiver must be valid (see Validate).
-func (t *Tools) Cut(out Output) Output {
-	if out.Parts != nil {
-		return out
-	}
-	bound, head := t.budgets()
-	return Output{Text: cutText(out.Text, bound, head)}
-}
-
-// New validates options and returns a copy of them.
-func New(options Tools) (*Tools, error) {
-	if err := options.Validate(); err != nil {
-		return nil, err
-	}
-	return &options, nil
-}
-
-// Validate checks the nested Documentation options, then ResultBound and ResultHead: negatives are refused, the resolved bound
-// must be at least 128, the resolved head below it, and at least 64 bytes must remain
-// after the head for the marker and tail.
-func (t *Tools) Validate() error {
-	if err := t.Documentation.Validate(); err != nil {
-		return err
-	}
-	if t.ResultBound < 0 {
-		return fmt.Errorf("tools: ResultBound %d is negative", t.ResultBound)
-	}
-	if t.ResultHead < 0 {
-		return fmt.Errorf("tools: ResultHead %d is negative", t.ResultHead)
-	}
-	bound, head := t.budgets()
-	if bound < minResultBound {
-		return fmt.Errorf("tools: ResultBound %d is below the minimum %d", bound, minResultBound)
-	}
-	if head >= bound {
-		return fmt.Errorf("tools: ResultHead %d must be less than ResultBound %d", head, bound)
-	}
-	if bound-head < minResultTail {
-		return fmt.Errorf("tools: ResultBound %d minus ResultHead %d leaves %d bytes remaining, need at least %d for the marker and tail", bound, head, bound-head, minResultTail)
-	}
-	return nil
-}
-
-func (t *Tools) budgets() (bound, head int) {
-	bound, head = t.ResultBound, t.ResultHead
-	if bound == 0 {
-		bound = maxResult
-	}
-	if head == 0 {
-		head = defaultResultHead
-	}
-	return bound, head
-}
-
 // Tools runs the model's tool calls in one repository. A refused or failed call is a tool
 // result (text starting `error:` or `refused:`), never a Go error; the only error is an
 // interrupt, context stop during timeout custody, or timeout observation failure.
@@ -129,18 +74,11 @@ type Tools struct {
 	Probe func(command string, files any) (string, error)
 	// Documentation is the shaper's documentation tool (user-agent, timeout).
 	Documentation Documentation
-	// ResultBound is the most UTF-8 bytes of a result the engine delivers (see Cut). Zero:
-	// 16384. Library only.
-	ResultBound int
-	// ResultHead is the bytes kept from the start of a longer result. Zero: 4096.
-	ResultHead int
 }
 
 const (
 	maxResult         = 16_384
 	defaultResultHead = 4096
-	minResultBound    = 128
-	minResultTail     = 64
 )
 
 // Run runs one tool call. The arguments are a decoded JSON object (Call.Args).
