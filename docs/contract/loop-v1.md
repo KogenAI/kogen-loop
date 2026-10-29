@@ -476,9 +476,22 @@ Typed `sys.Error{Class, Reason, Detail, Exit}`. Provider errors keep their exist
   `anthropic_invalid` category may have one of `error_type`, `stop_reason`,
   `block_type`, or `delta_type`; unrecognized or ill-typed values are `unknown`.
   These allowlisted values contain no provider messages or payloads. A null
-  `ttft_ms` does not prove no first token, and unknown `usage_state` does not
+  `ttft_ms` does not prove no first token (non-streaming reads and streams without a
+  parsed delta report null), and unknown `usage_state` does not
   prove no processing. A false failed end-turn/tool-use marker does not identify
   the cause. Diagnostics do not change retry or validity decisions.
+- Every provider attempt record also carries stream observations, in integer
+  milliseconds relative to that attempt's own start and reset on each retry:
+  `headers_ms` (after the client's successful Do), `first_byte_ms`, `last_byte_ms`,
+  `ttft_ms` (the first parsed Responses `*.delta` or Messages `content_block_delta` /
+  `message_delta` event), `max_gap_ms`, `gap_hist` (six counts of gaps between
+  consecutive positive-byte reads: [0,1s], (1s,10s], (10s,30s], (30s,60s], (60s,120s],
+  over 120s), `stream_bytes` and `end_reason` (`complete`, `transport`, `cancel` or
+  `budget`, with the precedence of the transport-failure path; a stream cut before its
+  completion is `transport` even where the parser reads EOF as the end). Missing
+  observations are null. Chat Completions and error-body reads set only `headers_ms`
+  and `last_byte_ms`. They are observations only: requests, retries, budgets and
+  results are unchanged.
 - **Breaking changes** (removed or renamed field, changed meaning, changed engine order, changed default behavior) need `kogen-loop/v2` and `loop/v2`, and consumers must migrate deliberately.
 The external reference described a Kogen-owned synchronized copy at
 `cli/third_party/kogen-loop/`, a `replace` directive, sync script and

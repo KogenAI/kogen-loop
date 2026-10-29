@@ -125,6 +125,7 @@ type run struct {
 	requestID   string
 	cacheStatus string
 	respMeta    map[string]any
+	so          *streamObs // the current attempt's stream observations
 }
 
 type operation struct {
@@ -492,6 +493,7 @@ func (r *run) transport(token string) (result, error) {
 	start := r.k.c.now()
 	ts := timestamp(start)
 	r.requestID = ""
+	r.so = newStreamObs(start)
 	res, err := r.exchange(token)
 	if err == nil && res.kind == resError && r.refused(res.fail) {
 		// The refusal is evidence of the route, whatever happens next.
@@ -551,8 +553,10 @@ func (r *run) exchange(token string) (result, error) {
 
 func (r *run) exchangeResponses(token string) (result, error) {
 	k := r.k
+	r.so.endTracked = true
 	ctx, cancel, err := k.requestContext()
 	if err != nil {
+		r.so.finishCheck(k)
 		return result{}, err
 	}
 	defer cancel()
@@ -579,9 +583,11 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
+	r.so.gotHeaders(k.c.now())
 	r.requestID = identifier(resp.Header.Get("X-Request-Id"))
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		r.so.endTracked = false
+		body, rerr := io.ReadAll(io.LimitReader(r.whole(resp.Body), 4<<20))
 		if rerr != nil {
 			return r.transportFailure(ctx, rerr)
 		}
@@ -590,27 +596,46 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		}
 		return httpFailure(resp.StatusCode, body, k.info.supergrok(), token), nil
 	}
+	r.so.beginStream()
 	acc := newAccumulator()
 	buf := make([]byte, 32<<10)
 	for {
 		if err := k.check(); err != nil {
+			r.so.finishCheck(k)
 			return result{}, err
 		}
 		n, rerr := resp.Body.Read(buf)
+		at := k.c.now()
+		r.so.read(at, n)
 		if n > 0 {
-			if detail := acc.feed(string(buf[:n])); detail != "" {
+			detail := acc.feed(string(buf[:n]))
+			if acc.delta {
+				r.so.firstDelta(at)
+			}
+			if detail != "" {
+				r.so.finish("complete")
 				return result{kind: resInvalid, detail: detail}, nil
 			}
 			if err := k.check(); err != nil {
+				r.so.finishCheck(k)
 				return result{}, err
 			}
 			if acc.done || acc.failure != nil {
+				r.so.finish("complete")
 				return acc.finish(k.info.supergrok()), nil
 			}
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
 			if err := k.check(); err != nil {
+				r.so.finishCheck(k)
 				return result{}, err
+			}
+			// The parser takes EOF as the end; the telemetry calls a stream that never
+			// completed a broken one.
+			if rerr == io.EOF && (acc.done || acc.failure != nil) {
+				r.so.finish("complete")
+			} else {
+				r.so.finish("transport")
 			}
 			return acc.finish(k.info.supergrok()), nil
 		}
@@ -641,8 +666,9 @@ func (r *run) exchangeChat(key string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
+	r.so.gotHeaders(k.c.now())
 	r.requestID = identifier(resp.Header.Get("X-Request-Id"))
-	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, rerr := io.ReadAll(io.LimitReader(r.whole(resp.Body), 64<<20))
 	if rerr != nil {
 		return r.transportFailure(ctx, rerr)
 	}
@@ -685,8 +711,10 @@ func (r *run) exchangeChat(key string) (result, error) {
 // exchangeMessages is one Anthropic request: a streamed answer assembled once complete.
 func (r *run) exchangeMessages(key string) (result, error) {
 	k := r.k
+	r.so.endTracked = true
 	ctx, cancel, err := k.requestContext()
 	if err != nil {
+		r.so.finishCheck(k)
 		return result{}, err
 	}
 	defer cancel()
@@ -698,6 +726,7 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
+	r.so.gotHeaders(k.c.now())
 	for _, name := range []string{"Request-Id", "X-Request-Id"} {
 		if id := safeIdentifier(resp.Header.Get(name), key); id != nil {
 			r.requestID = id.(string)
@@ -705,7 +734,8 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		}
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		r.so.endTracked = false
+		body, rerr := io.ReadAll(io.LimitReader(r.whole(resp.Body), 4<<20))
 		if rerr != nil {
 			return r.transportFailure(ctx, rerr)
 		}
@@ -714,30 +744,43 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		}
 		return messagesFailure(resp.StatusCode, body, key), nil
 	}
+	r.so.beginStream()
 	var all strings.Builder
 	tail := ""
 	buf := make([]byte, 32<<10)
 	for {
 		if err := k.check(); err != nil {
+			r.so.finishCheck(k)
 			return result{}, err
 		}
 		n, rerr := resp.Body.Read(buf)
+		at := k.c.now()
+		r.so.read(at, n)
 		if n > 0 {
 			chunk := string(buf[:n])
 			all.WriteString(chunk)
 			pieces := strings.Split(strings.ReplaceAll(tail+chunk, "\r\n", "\n"), "\n\n")
 			tail = pieces[len(pieces)-1]
 			for _, p := range pieces[:len(pieces)-1] {
-				if f := decodeFrame(p); f.event != nil && (f.event["type"] == "message_stop" || f.event["type"] == "error") {
-					return r.completeMessages(all.String(), key)
+				f := decodeFrame(p)
+				if f.event == nil {
+					continue
+				}
+				if f.event["type"] == "content_block_delta" || f.event["type"] == "message_delta" {
+					r.so.firstDelta(at)
+				}
+				if f.event["type"] == "message_stop" || f.event["type"] == "error" {
+					return r.completeMessages(all.String(), key, "complete")
 				}
 			}
 			if err := k.check(); err != nil {
+				r.so.finishCheck(k)
 				return result{}, err
 			}
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
-			return r.completeMessages(all.String(), key)
+			// An unfinished frame is not a parsed terminal event.
+			return r.completeMessages(all.String(), key, "transport")
 		}
 		if rerr != nil {
 			return r.transportFailure(ctx, rerr)
@@ -745,10 +788,12 @@ func (r *run) exchangeMessages(key string) (result, error) {
 	}
 }
 
-func (r *run) completeMessages(stream, key string) (result, error) {
+func (r *run) completeMessages(stream, key, end string) (result, error) {
 	if err := r.k.check(); err != nil {
+		r.so.finishCheck(r.k)
 		return result{}, err
 	}
+	r.so.finish(end)
 	res := parseMessages(stream)
 	if res.kind == resOK {
 		meta := map[string]any{
@@ -799,6 +844,7 @@ func messagesFailure(status int, body []byte, key string) result {
 // transportFailure is a failed exchange: the caller's interrupt or the spent budget end
 // the call; anything else is a transient network error.
 func (r *run) transportFailure(ctx context.Context, err error) (result, error) {
+	r.so.finishFailure(r.k, ctx.Err())
 	if stop, ok := r.k.stopped(); ok {
 		return result{}, stop
 	}
@@ -886,10 +932,12 @@ func (r *run) record(res result, err error, start time.Time, ts string) {
 		"usage":                       known.Map(),
 		"usage_state":                 state,
 		"wall_ms":                     r.k.c.now().Sub(start).Milliseconds(),
-		"ttft_ms":                     nil,
 		"outcome":                     outcome,
 		"error":                       errField,
 	} {
+		rec[k] = v
+	}
+	for k, v := range r.so.fields() {
 		rec[k] = v
 	}
 	switch {
