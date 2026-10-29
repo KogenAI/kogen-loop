@@ -525,7 +525,6 @@ func (r *run) post(ctx context.Context, url string, header map[string]string) (*
 	for k, v := range r.rend.headers {
 		req.Header.Set(k, v)
 	}
-	r.logPrefix()
 	return r.k.do(req)
 }
 
@@ -567,7 +566,6 @@ func (r *run) exchangeResponses(token string) (result, error) {
 	if !k.info.supergrok() {
 		req.Header["User-Agent"] = []string{""}
 	}
-	r.logPrefix()
 	resp, err := k.do(req)
 	if err != nil {
 		return r.transportFailure(ctx, err)

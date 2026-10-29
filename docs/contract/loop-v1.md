@@ -17,7 +17,7 @@ Neither surface knows Kogen's approval, Intent, baseline, verification, review, 
   - tool result texts and the 16384-byte cut;
   - replay items;
   - request bodies, cache identity placement, retry and stream accumulation.
-  The adopted golden tests guard these compatibility bytes. The library-only positive `Tools.ShellTimeout` opt-in changes only its configuration-aware shell description and expired-command feedback as specified below; zero retains the original bytes. The library-only `Tools.CompactDescriptions` opt-in changes descriptions as specified below; false retains the full descriptions.
+  The adopted golden tests guard these compatibility bytes. The library-only positive `Tools.ShellTimeout` opt-in changes only its configuration-aware shell description and expired-command feedback as specified below; zero retains the original bytes.
 - **L3 No hidden fallback.** No provider, route, key or model substitution and no extra retries beyond the provider policy moved from Kogen (3 transport attempts, one unreadable-answer retry, one refresh after a 401 for sign-in routes). Refusals are reported honestly.
 - **L4 Unknown stays unknown.** Usage comes from provider-reported fields only. Missing values are `null` and the usage `state` is `partial` or `unknown`. Nothing is estimated.
 - **L5 Credentials.** The loop reads the existing store at `$HOME/.kogen/credentials/<provider>.json` (same format, 0600) with the same login/refresh behavior. It never prints, copies, proxies or exports tokens. Signing in remains the caller's job (`kogen provider login …`, or `provider.Login` for library callers).
@@ -127,15 +127,6 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
 - Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
 
-### Terminal reminders (Go library)
-
-`Round.TerminalReminders int` (and `SessionConfig.TerminalReminders`) is an opt-in library option; no task JSON field or CLI flag exists and there is no default. Nonpositive keeps today's behavior: a response without a tool call ends the round with `EndNoCall`. A positive value permits that many reminder continuations per `Run` (the count resets on every `Run`, including each Session turn), only after a response with no tool call and no terminal. A terminal call, including an intercepted one, ends the round immediately. When the budget is spent the round ends with `EndNoCall` normally.
-
-- The reminder is one appended user message after the replayed response: `Call one of these terminal tools to end this round: ` followed by the effective `Terminal` names (default `finish`) in configured order joined with `, ` and a final `.`. Any listed terminal satisfies it.
-- `Hooks.TerminalReminder func(ctx, reminder int, terminals []string) error` is called once per appended reminder, before the next request, with the 1-based number and the terminal names; an error stops the run and is returned unchanged.
-- Reminder continuations obey `Progress` and `MaxRounds` (checked as for a continuing round, counters not reset); if a stop wins, no reminder is appended or announced. Further requests count in `Result.Requests`.
-- `Session` emits `round.terminal_reminder` with `reminder` (1-based) and `terminal_tools` (ordered array) through its sequenced event sink for each reminder.
-
 ### Input window budget (Go library)
 
 `InputBudgetBytes int` on `loop.FailOverBudget` and `loop.Direct` is a library-only lower-only option: no task JSON field, CLI flag or `SessionConfig` option exists. Zero keeps today's inclusive 524288-byte ceiling. A nonzero value must be in [65536, 524288]; negatives and out-of-range values return `loop/invalid_task` (exit 2) naming `InputBudgetBytes` and the range, before anything is sent. `FailOverBudget.Prepare` and `Direct`, which always applies it, validate it.
@@ -171,7 +162,6 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 - With tools, the Responses wire (ChatGPT, SuperGrok) sends `tool_choice: {"type":"function","name":"submit"}` and the Chat Completions wire (OpenCode Go, OpenAI-compatible) sends `{"type":"function","function":{"name":"submit"}}`; any other name uses the same transformation. The name is not checked against `Tools`. Without tools no `tool_choice` is sent, as before; an unsupported route still refuses.
 - Support follows the effective wire and profile settings after profile resolution, exactly as rendering does. Current Anthropic Messages profiles use adaptive thinking, which does not permit a forced tool: `SupportsToolChoice` reports false. Unknown providers report false. A Messages profile with thinking disabled would encode `{"type":"tool","name":"submit"}` (keeping `disable_parallel_tool_use` when requested); none exists today.
 - An unsupported route refuses a nonempty `ToolChoice` in `Render` and `Respond` with `provider/unsupported_capability`, exit 4, a detail naming `ToolChoice` and the route (for example `Messages route anthropic`), before any credential lookup, network call or attempt record. It is never silently ignored or weakened.
-- Reminder fallback: a caller that needs a terminal call on an unsupported route checks `SupportsToolChoice` and leaves `ToolChoice` empty, relying on `TerminalReminders` (see Terminal reminders) to ask for the terminal call instead.
 
 ### Authority cache breakpoint (Go library, Messages wire)
 
@@ -210,53 +200,6 @@ round end. A blocking PreToolUse hook on the `Bash` matcher using `ForeignKill` 
 possible but unverified and belongs to a separate item, K-SAFE-2. Kogen cannot see or
 stop what `claude` runs between hooks, or processes that leave the group.
 
-### Compact tool descriptions (Go tools only)
-
-`tools.Tools.CompactDescriptions` opts in to shorter descriptions from the
-instance's `Definition` method; its zero value retains full descriptions.
-Schemas and tool execution are unchanged. Package `tools.Definition` and
-`tools.Defs` always return full descriptions. A positive `ShellTimeout` is
-reflected in the instance's compact shell description too. Build the request's
-definitions with the same configured instance used for execution:
-
-```go
-t := &tools.Tools{Root: root, Enabled: []string{tools.ReadFileTool, tools.ShellTool},
-    CompactDescriptions: true}
-read, _ := t.Definition(tools.ReadFileTool)
-shell, _ := t.Definition(tools.ShellTool)
-r := loop.Round{Tools: t, Definitions: []any{read, shell}}
-// Supply the round's other caller-owned fields as usual.
-```
-
-This library option adds no CLI or task setting. It reduces serialized definition
-bytes; it does not claim measured provider token savings or tool-call error rates.
-
-### Omit view_image (Go tools only)
-
-`tools.Tools.OmitViewImage` is an opt-in boolean, false by default. When true,
-the instance's `Definition(tools.ViewImageTool)` returns `(nil, false)`, and
-execution returns `error: unknown tool view_image` even if `Enabled` includes it.
-Other definitions and execution are unchanged. Package `tools.Definition` and
-`tools.Defs` remain unchanged and still expose `view_image`. Assemble definitions
-by retaining successful instance results in the desired order and use that same
-instance for execution:
-
-```go
-names := []string{tools.ReadFileTool, tools.ViewImageTool, tools.ShellTool}
-t := &tools.Tools{Root: root, Enabled: names, OmitViewImage: true}
-var definitions []any
-for _, name := range names {
-    if def, ok := t.Definition(name); ok {
-        definitions = append(definitions, def)
-    }
-}
-r := loop.Round{Tools: t, Definitions: definitions}
-// Supply the round's other caller-owned fields as usual.
-```
-
-The engine does not filter caller-supplied definitions. This library-only option
-adds no CLI flag, task field, environment setting or capability.
-
 ### Caller-owned shell duration (Go tools only)
 
 `tools.Tools` adds `ShellTimeout time.Duration`. Nonpositive values are off;
@@ -267,10 +210,9 @@ environment setting, capability entry or automatic default is added.
 
 `func (t *Tools) Definition(name string) (map[string]any, bool)` returns the
 package definition/unknown-name behavior unchanged by default except for shell with a
-positive bound. In full mode it replaces only `Commands have no time limit.` with
+positive bound. It replaces only `Commands have no time limit.` with
 `Each shell call has a caller-configured time limit of <duration>. A timed-out command's process group is stopped before a timed-out result is returned.`
-where `<duration>` is Go `time.Duration.String()`. Compact mode instead states the
-same bound and group teardown in shorter text. Command-only parameters,
+where `<duration>` is Go `time.Duration.String()`. Command-only parameters,
 required arguments and `additionalProperties` stay unchanged. Repeated generation
 is stable and does not mutate earlier definitions or package defaults.
 `tools.Definition` and `tools.Defs` remain unbounded and byte-identical.
@@ -510,71 +452,3 @@ A documentation `fetch` accepts optional `offset` (integer) and `find` (string).
 Every fetch outcome reports `body_total`, the decoded body bytes (zero when no body was retrieved). A ranged fetch (`offset` or `find` given) also reports `body_offset`, the source byte where `body` starts. `next_offset`, present only when source remains after fitting, is the first unconsumed source byte (`body_offset` plus the source bytes emitted); the synthetic untrusted marker consumes no source bytes. Pass it as `offset` for the next call; each call is one independent fetch, nothing is cached and no limit, timeout or retry changes.
 
 Exception: a plain fetch (no `offset`, no `find`) returns exactly the body bytes it always did and adds only `body_total` and, when truncated, `next_offset`; it never reports `body_offset`. Search output is unchanged.
-
-### Provider request prefix events (Go library only)
-
-Set `provider.Client.PrefixLog` before concurrent use to receive synchronous
-`provider.PrefixEvent` callbacks immediately before each model HTTP attempt, including
-retries. Authentication requests and `Render`/`Body` measurements do not emit events.
-`ConversationID` follows the request's cache identity; `Role` and a snapshot of
-`Request.Context` allow host-side grouping. Events contain no request body. Avoid putting
-secrets or body contents in `Context` yourself. The callback has no error return and must
-not reenter prefix logging on the same client.
-
-`first` has nil `PreviousBytes` and `Offset`; `identical` has both sizes and a nil
-`Offset`; `diverged` has both sizes and a zero-based byte `Offset`. A strict prefix
-diverges at the shorter length. The client retains only the immediately previous exact
-body for each active conversation, bounded by the accepted request-body limit (default
-524288 bytes); total memory is proportional to active conversations. A nil callback
-retains no instrumentation state. No cache benefit is implied.
-
-Direct provider callers must end the instrumentation lifetime when the conversation ends,
-including on errors or cancellation, not after each Respond:
-
-```go
-client := provider.NewClient("host")
-client.PrefixLog = func(event provider.PrefixEvent) { /* consume metadata */ }
-req := provider.Request{Role: role, Scope: scope}
-defer client.EndPrefixLog(req)
-// Use client.Respond with req throughout this conversation.
-```
-
-Ending releases only instrumentation state; it does not change prompt-cache state.
-Reusing an ended identity starts with `first`.
-
-### Caller-owned read ledger (Go library only)
-
-`Round.ReadLedger` is nil by default and leaves tool output and requests unchanged. A
-caller may opt in with `ledger := loop.NewReadLedger()` and reuse that pointer on
-`Round` values for a logical round. Successful nonterminal built-in `read_file` and
-`view_image` calls are retained in order, including duplicates and reads before a
-later error. Failed, skipped, terminal and host-handled calls are not retained.
-
-A caller deciding to discard its working conversation explicitly constructs a fresh
-input and records the returned event using its own run-event sink:
-
-```go
-ledger := loop.NewReadLedger()
-round := loop.Round{ReadLedger: ledger} // configure the other fields as usual
-// Call loop.Run with round; the caller may later decide to reset its window.
-input, event := ledger.Continuation(freshBase)
-// Emit event to the caller's run-event sink, then call loop.Run with round and input.
-_, _ = input, event
-```
-
-Continuation copies the base slice and appends exactly one user message containing
-compact JSON. It does not replay old conversation or clear the ledger. Its content
-is capped at 8192 UTF-8 bytes including the JSON envelope; oldest entries are evicted
-first, including an oversized entry itself. The dropped count is cumulative. The
-returned `read_ledger_reset` event reports retained `entries`, content `bytes`, and
-`dropped`; every explicit continuation returns an event, even when empty. The caller
-owns the ledger and event emission; there is no standalone reset event or CLI option.
-
-Text entries disclose the first non-empty delivered source line as a trimmed note,
-limited to 80 Unicode scalars, and the actual inclusive line range. The SHA256 is
-of the final delivered numbered text, including any output truncation marker (empty
-output hashes empty bytes). Image entries contain only the argument path and the
-existing snapshot SHA256, not image bytes or dimensions. Apart from the bounded note,
-continuation contains no read result text or replayed tool output. Paths preserve
-argument spelling. This option does not trigger resets or change budget limits:
-`FailOverBudget` still refuses over-budget requests without sending or clipping.

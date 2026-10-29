@@ -399,7 +399,7 @@ func TestStreamIdleCompatibility(t *testing.T) {
 			}
 			return names
 		}
-		wantClient := []string{"HTTP", "Now", "Sleep", "Cache", "PrefixLog", "Locker", "Input", "Version", "ResponseBudget"}
+		wantClient := []string{"HTTP", "Now", "Sleep", "Cache", "Locker", "Input", "Version", "ResponseBudget"}
 		wantRequest := []string{"Role", "Instructions", "Input", "Tools", "DisableParallelToolCalls", "ToolChoice", "AuthorityBoundary", "Single", "CacheID", "Scope", "Cache", "Context"}
 		if got := exported(Client{}); !reflect.DeepEqual(got, wantClient) {
 			t.Errorf("Client options = %v, want %v", got, wantClient)
