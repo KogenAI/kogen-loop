@@ -116,6 +116,14 @@ func (o *streamObs) finish(reason string) {
 	o.end = reason
 }
 
+// finishIdle records an attempt ended by the first-byte or idle timeout, on any route.
+func (o *streamObs) finishIdle() {
+	if o == nil || o.end != "" {
+		return
+	}
+	o.end = "idle"
+}
+
 // finishCheck records the end of a stream stopped by the call's check: a caller interrupt
 // or the spent budget.
 func (o *streamObs) finishCheck(k *call) {
@@ -183,18 +191,24 @@ func (o *streamObs) fields() map[string]any {
 type obsBody struct {
 	r   io.Reader
 	o   *streamObs
+	w   *idleWatch
 	now func() time.Time
 }
 
+// Read fails with errIdle once the attempt's silence limit has passed.
 func (b obsBody) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
+	at := b.now()
 	if n > 0 {
-		b.o.read(b.now(), n)
+		b.o.read(at, n)
+	}
+	if b.w.observe(at, n) {
+		return n, errIdle
 	}
 	return n, err
 }
 
 // whole is a body whose reads are observed for io.ReadAll.
 func (r *run) whole(body io.Reader) io.Reader {
-	return obsBody{r: body, o: r.so, now: r.k.c.now}
+	return obsBody{r: body, o: r.so, w: r.watch, now: r.k.c.now}
 }

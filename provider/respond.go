@@ -126,6 +126,7 @@ type run struct {
 	cacheStatus string
 	respMeta    map[string]any
 	so          *streamObs // the current attempt's stream observations
+	watch       *idleWatch // the current attempt's first-byte and idle timer
 }
 
 type operation struct {
@@ -494,7 +495,9 @@ func (r *run) transport(token string) (result, error) {
 	ts := timestamp(start)
 	r.requestID = ""
 	r.so = newStreamObs(start)
+	r.watch = nil
 	res, err := r.exchange(token)
+	r.watch = nil
 	if err == nil && res.kind == resError && r.refused(res.fail) {
 		// The refusal is evidence of the route, whatever happens next.
 		r.markUnsupported()
@@ -560,6 +563,8 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		return result{}, err
 	}
 	defer cancel()
+	w := r.newWatch(cancel)
+	defer w.stop()
 	header := map[string]string{"Authorization": "Bearer " + token, "Accept": "text/event-stream", "Content-Type": "application/json"}
 	if k.info.supergrok() {
 		header["User-Agent"] = k.c.userAgent()
@@ -583,8 +588,12 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
+	w.attach(resp.Body)
 	r.so.gotHeaders(k.c.now())
 	r.requestID = identifier(resp.Header.Get("X-Request-Id"))
+	if w.expired() {
+		return r.idleStop(ctx, w)
+	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		r.so.endTracked = false
 		body, rerr := io.ReadAll(io.LimitReader(r.whole(resp.Body), 4<<20))
@@ -607,6 +616,9 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		n, rerr := resp.Body.Read(buf)
 		at := k.c.now()
 		r.so.read(at, n)
+		if w.observe(at, n) {
+			return r.idleStop(ctx, w)
+		}
 		if n > 0 {
 			detail := acc.feed(string(buf[:n]))
 			if acc.delta {
@@ -653,6 +665,8 @@ func (r *run) exchangeChat(key string) (result, error) {
 		return result{}, err
 	}
 	defer cancel()
+	w := r.newWatch(cancel)
+	defer w.stop()
 	header := map[string]string{"Accept": "application/json", "Content-Type": "application/json", "User-Agent": k.c.userAgent()}
 	if key != "" {
 		header["Authorization"] = "Bearer " + key
@@ -666,8 +680,14 @@ func (r *run) exchangeChat(key string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
-	r.so.gotHeaders(k.c.now())
+	w.attach(resp.Body)
+	at := k.c.now()
+	r.so.gotHeaders(at)
 	r.requestID = identifier(resp.Header.Get("X-Request-Id"))
+	// A body read whole has no stream: its headers are the first byte and idle starts there.
+	if w.observe(at, 1) {
+		return r.idleStop(ctx, w)
+	}
 	body, rerr := io.ReadAll(io.LimitReader(r.whole(resp.Body), 64<<20))
 	if rerr != nil {
 		return r.transportFailure(ctx, rerr)
@@ -718,6 +738,8 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		return result{}, err
 	}
 	defer cancel()
+	w := r.newWatch(cancel)
+	defer w.stop()
 	resp, err := r.post(ctx, k.origin()+messagesPath, map[string]string{
 		"x-api-key": key, "anthropic-version": anthropicVersion, "Accept": "text/event-stream",
 		"Content-Type": "application/json", "User-Agent": k.c.userAgent(),
@@ -726,12 +748,16 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		return r.transportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
+	w.attach(resp.Body)
 	r.so.gotHeaders(k.c.now())
 	for _, name := range []string{"Request-Id", "X-Request-Id"} {
 		if id := safeIdentifier(resp.Header.Get(name), key); id != nil {
 			r.requestID = id.(string)
 			break
 		}
+	}
+	if w.expired() {
+		return r.idleStop(ctx, w)
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		r.so.endTracked = false
@@ -756,6 +782,9 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		n, rerr := resp.Body.Read(buf)
 		at := k.c.now()
 		r.so.read(at, n)
+		if w.observe(at, n) {
+			return r.idleStop(ctx, w)
+		}
 		if n > 0 {
 			chunk := string(buf[:n])
 			all.WriteString(chunk)
@@ -844,6 +873,9 @@ func messagesFailure(status int, body []byte, key string) result {
 // transportFailure is a failed exchange: the caller's interrupt or the spent budget end
 // the call; anything else is a transient network error.
 func (r *run) transportFailure(ctx context.Context, err error) (result, error) {
+	if _, ok := r.k.stopped(); !ok && r.watch.expired() {
+		return r.idleStop(ctx, r.watch)
+	}
 	r.so.finishFailure(r.k, ctx.Err())
 	if stop, ok := r.k.stopped(); ok {
 		return result{}, stop

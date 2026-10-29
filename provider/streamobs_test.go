@@ -209,7 +209,7 @@ func TestStreamObsTiming(t *testing.T) {
 			{advance: time.Second, data: delta[15:]},
 		}}
 		full := msgStart() + msgBlockStart() + msgDelta() + msgTail()
-		e, _, req := obsEnv(t, "anthropic", cut, obsAttempt{headersAdvance: 5 * ms1, steps: []obsStep{{advance: 125 * time.Second, data: full}}})
+		e, _, req := obsEnv(t, "anthropic", cut, obsAttempt{headersAdvance: 5 * ms1, steps: []obsStep{{advance: 40 * time.Second, data: full}}})
 		obs := &observer{}
 		if _, err := e.c.Respond(context.Background(), e.s, req, obs); err != nil {
 			t.Fatal(err)
@@ -221,7 +221,7 @@ func TestStreamObsTiming(t *testing.T) {
 			"stream_bytes": int64(len(": ping\n\n"+msgStart()) + len(msgBlockStart()+delta)), "end_reason": "transport", "outcome": "failed",
 		})
 		wantFields(t, "attempt 2", recs[1], map[string]any{
-			"headers_ms": int64(5), "first_byte_ms": int64(125005), "ttft_ms": int64(125005), "last_byte_ms": int64(125005),
+			"headers_ms": int64(5), "first_byte_ms": int64(40005), "ttft_ms": int64(40005), "last_byte_ms": int64(40005),
 			"max_gap_ms": int64(0), "gap_hist": hist(0, 0, 0, 0, 0, 0), "stream_bytes": int64(len(full)), "end_reason": "complete", "outcome": "completed",
 		})
 	})

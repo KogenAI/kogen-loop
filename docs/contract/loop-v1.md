@@ -163,6 +163,8 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 
 - Precedence: the effective logical-call budget is the client value (30 minutes for zero), shortened by an existing positive `Request.Budget` when that is smaller. `Request.Budget` keeps its semantics (subsecond values allowed, values above the ceiling clamped; the 1-second minimum applies to the client option only) and can neither raise the client ceiling nor bypass invalid client validation.
 - The budget stays absolute: it covers credential waits, refresh, transport, stream reads, retry backoff and retries; bytes and heartbeats never renew it. No retry is added.
+- Every transport attempt also has default silence timeouts, for everyone and without a caller-facing option; they end only that attempt and never renew or extend the absolute budget. The first byte must arrive within 90 s for ChatGPT and 45 s for Anthropic Messages and every other provider; after that no more than 180 s may pass between bytes. For streams (Responses, Messages) the first-byte clock starts at request dispatch, response headers are not a stream byte, and any actual body byte, a heartbeat or a partial frame included, renews the idle clock (a read of zero bytes does not). For non-streaming Chat Completions the headers are the first byte, idle starts at the headers and body bytes renew it. Elapsed time is read from `Client.Now`; a blocked header wait or body read is cancelled when its limit passes rather than waiting for another byte. A byte arriving strictly before the limit is valid; at the limit the attempt has expired.
+- An expired attempt is a transient failure (outcome `failed`, `end_reason` `idle`, also on Chat Completions) whose detail is `no first byte within 90 s`, `no first byte within 45 s` or `stream idle for 180 s`. It is retried by the existing attempt policy with unchanged count and 2 s/8 s backoff, and is single-shot with `Request.Single` on ChatGPT. The absolute budget and caller cancellation take precedence over an overlapping timeout. Request bytes are unchanged.
 - Expiry uses the existing path: `provider/unavailable`, exit 4, provider-labelled. With `ResponseBudget` zero the detail is exactly `response wait exceeded 30 minutes` (also when `Request.Budget` shortens the wait). With a nonzero value the detail is `response wait exceeded ` plus the effective budget as `time.Duration.String()`, including a smaller `Request.Budget`: for example `response wait exceeded 10m0s`, `30m0s` for an explicit 30 minutes, `2s`.
 
 ### Disabling parallel tool calls (Go library)
@@ -486,12 +488,14 @@ Typed `sys.Error{Class, Reason, Detail, Exit}`. Provider errors keep their exist
   `ttft_ms` (the first parsed Responses `*.delta` or Messages `content_block_delta` /
   `message_delta` event), `max_gap_ms`, `gap_hist` (six counts of gaps between
   consecutive positive-byte reads: [0,1s], (1s,10s], (10s,30s], (30s,60s], (60s,120s],
-  over 120s), `stream_bytes` and `end_reason` (`complete`, `transport`, `cancel` or
-  `budget`, with the precedence of the transport-failure path; a stream cut before its
-  completion is `transport` even where the parser reads EOF as the end). Missing
-  observations are null. Chat Completions and error-body reads set only `headers_ms`
-  and `last_byte_ms`. They are observations only: requests, retries, budgets and
-  results are unchanged.
+  over 120s), `stream_bytes` and `end_reason` (`complete`, `transport`, `cancel`,
+  `budget` or `idle`, with the precedence of the transport-failure path; a stream cut
+  before its completion is `transport` even where the parser reads EOF as the end).
+  `idle` marks an attempt ended by the first-byte or idle timeout (see Client response
+  budget), on every route including Chat Completions. Missing observations are null.
+  Chat Completions and error-body reads set only `headers_ms` and `last_byte_ms`. The
+  observations themselves change nothing; the only enforcement is the per-attempt
+  first-byte and idle timeout above, and requests, budgets and results are unchanged.
 - **Breaking changes** (removed or renamed field, changed meaning, changed engine order, changed default behavior) need `kogen-loop/v2` and `loop/v2`, and consumers must migrate deliberately.
 The external reference described a Kogen-owned synchronized copy at
 `cli/third_party/kogen-loop/`, a `replace` directive, sync script and
