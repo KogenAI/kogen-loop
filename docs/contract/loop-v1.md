@@ -21,7 +21,7 @@ Neither surface knows Kogen's approval, Intent, baseline, verification, review, 
 - **L3 No hidden fallback.** No provider, route, key or model substitution and no extra retries beyond the provider policy moved from Kogen (3 transport attempts, one unreadable-answer retry, one refresh after a 401 for sign-in routes). Refusals are reported honestly.
 - **L4 Unknown stays unknown.** Usage comes from provider-reported fields only. Missing values are `null` and the usage `state` is `partial` or `unknown`. Nothing is estimated.
 - **L5 Credentials.** The loop reads the existing store at `$HOME/.kogen/credentials/<provider>.json` (same format, 0600) with the same login/refresh behavior. It never prints, copies, proxies or exports tokens. Signing in remains the caller's job (`kogen provider login …`, or `provider.Login` for library callers).
-- **L6 Process custody.** Shell tools run in their own process groups. Cancellation, deadline or interruption terminates every group the loop started (SIGTERM, then SIGKILL after a bounded wait) before the call returns. A host binary calls `sys.MaybeSupervise(os.Args[1:])` and `sys.EnableSupervisor()` first in `main`, as Kogen does. `cmd/kogen-loop` does so too, so a killed host still takes its command groups down. A library caller that skips this keeps only the in-process termination.  Shell calls have no per-call time limit.
+- **L6 Process custody.** Shell tools run in their own process groups. Cancellation, deadline or interruption terminates every group the loop started (SIGTERM, then SIGKILL after a bounded wait) before the call returns, including a shell that is still starting or is registered late. Every round also ends its own groups when it ends in any way (a terminal call, a no-call answer, a hook or requester error as well as cancellation, deadline or interruption), background processes included; they stay alive between the round's calls. Groups started before the round and processes that left their group (`setsid`, daemons) are not touched. A host binary calls `sys.MaybeSupervise(os.Args[1:])` and `sys.EnableSupervisor()` first in `main`, as Kogen does. `cmd/kogen-loop` does so too, so a killed host still takes its command groups down: the supervisor finishes the whole-group SIGTERM-then-SIGKILL escalation even when the direct shell exits on SIGTERM and a descendant ignores it, and a shell that already ended leaves a small keeper in its group while members remain, so a killed host still stops them. A library caller that skips this keeps only the in-process termination.  Shell calls have no per-call time limit.
 
 ## 2. Go library API (`loop/v1`)
 
@@ -158,7 +158,7 @@ SIGKILL to what remains; it returns when the group has no member. It never sets
 The sweep does not reach a process that left the group (`setsid`, own-session
 `nohup`, double-fork daemons, Gradle-style daemons). Group kill is not a sandbox.
 The `shell` tool does not set it: its background servers survive between calls, and
-round and engine cleanup end them with the round.
+the round's custody ends them when the round ends, whatever its outcome (L6).
 
 `sys.Options.RefuseForeignKill` (default false) makes `Run` call
 `ForeignKill(command, s.Owned)` before starting anything. A refusal starts nothing,
@@ -190,13 +190,16 @@ definitions from the instance they pass to the round; the engine still sends
 supplied definitions verbatim. `tools.Definition` and `tools.Defs` are byte-identical
 to their goldens.
 
-`Tools.RunContext` and `CallContext` do not forward their context to shell
-commands; `Run` and `Call` are nil-context wrappers. Cancellation, deadline and
-interruption stop the loop's round groups as described under L6. This is not
-overall execution custody.
+`Tools.RunContext` and `CallContext` forward their context to shell commands
+(`sys.Session.RunContext`): a done context starts no shell, and a shell that is
+starting or running has its process group terminated and joined before the call returns
+`ctx.Err()`; that is a stopping error, never tool feedback. `Run` and `Call` are
+nil-context wrappers that never stop a shell this way. Groups that finished shells left
+behind are ended by the round's custody (L6), not by the call.
 
 The lower-level `sys.Options.Timeout` and `sys.Options.Context` remain independent
-`sys` options with the custody rules below.
+`sys` options with the custody rules below. `Options.Context` still only cancels a
+fired positive-timeout custody wait; the execution context is `Session.RunContext`'s.
 
 Observation is in-process: Darwin uses numeric KERN_PROC_PGRP actual data length
 (including zombies), and Linux follows this rule. Linux first uses `kill(-pgid, 0)` as a monotone presence witness: success or `EPERM` means the group is present, with no readable `/proc` needed, and `pgid <= 1` is rejected before any kill. `ESRCH` alone never proves absence: Linux then enumerates `/proc` (zombies, state Z, included) and reads the group after the final `)` of each `stat`. Entries that vanish (`ENOENT`/`ESRCH`) are skipped; unreadable entries (`EPERM`/`EACCES`) and malformed `stat` are remembered, and a later membership witness wins over them. Without a witness, any remembered error or listing failure is an observation failure; only `ESRCH` plus a complete error-free scan with no member is absent. A `hidepid=1`/noaccess mount makes final confirmation fail rather than report absence; with `hidepid=2` (invisible) a hidden live member still cannot become absent because kill is a presence witness. Status as of 27 October 2026: research had reproduced the `ESRCH` defect on Linux; this correction was source-qualified on Darwin and cross-built, with Linux runtime proof pending at delivery. A cross-build does not prove lifecycle behavior. Other platforms explicitly lack native observation support.

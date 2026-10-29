@@ -47,8 +47,8 @@ func (o Output) Cut() Output {
 }
 
 // Tools runs the model's tool calls in one repository. A refused or failed call is a tool
-// result (text starting `error:` or `refused:`), never a Go error; the only error is an
-// interrupt.
+// result (text starting `error:` or `refused:`), never a Go error; the only errors are an
+// interrupt and a done context that stopped a shell.
 type Tools struct {
 	// Root is the repository root; relative paths resolve against it.
 	Root string
@@ -83,8 +83,10 @@ func (t *Tools) Run(name string, args map[string]any) (Output, error) {
 	return t.RunContext(nil, name, args)
 }
 
-// RunContext runs a call. ctx is not forwarded to shell commands; overall execution
-// custody remains the caller's responsibility.
+// RunContext runs a call. ctx (nil: never done) is forwarded to shell commands: a shell
+// that has not started does not start once ctx is done, and one that is starting or running
+// has its process group terminated and joined before the call returns ctx.Err(). Processes
+// a finished shell left behind are not touched here; the round's custody ends them.
 func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any) (Output, error) {
 	if !slices.Contains(t.Enabled, name) {
 		return Output{Text: "error: unknown tool " + name}, nil
@@ -101,7 +103,7 @@ func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any
 	case SearchTextTool:
 		return Output{Text: t.searchText(args)}, nil
 	case ShellTool:
-		text, rule, err := t.shell(args)
+		text, rule, err := t.shell(ctx, args)
 		return Output{Text: text, Rule: rule}, err
 	case ProbeTool:
 		text, err := t.probe(args)
@@ -413,13 +415,13 @@ func (t *Tools) searchText(args map[string]any) string {
 // shell runs /bin/sh -c in the repository root with stdin closed and no time limit.
 // A command that would stop processes this run did not start is refused with
 // sys.RefusalText as ordinary tool text. KillGroupOnExit stays off: background servers
-// outlive a call, and round and engine cleanup end them with the round.
-func (t *Tools) shell(args map[string]any) (string, string, error) {
+// outlive a call, and the round's custody ends them with the round, whatever its outcome.
+func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string, error) {
 	command, msg := stringArg(args, "command")
 	if msg != "" {
 		return msg, "", nil
 	}
-	res, err := t.session().Run(command, t.Root, sys.Options{RefuseForeignKill: true})
+	res, err := t.session().RunContext(ctx, command, t.Root, sys.Options{RefuseForeignKill: true})
 	if err != nil {
 		return "", "", err
 	}
