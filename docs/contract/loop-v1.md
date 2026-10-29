@@ -118,15 +118,6 @@ Cancellation observed after a response/call hook returns nil stops the round
 before executing a tool, starting another request or returning an ending. A hook error still
 takes precedence and is returned unchanged.
 
-### Round limit and no-progress stop (Go library)
-
-Both stops are optional and caller-enabled; neither has a default (no default `MaxRounds`, no default `Progress` hook). Callers that set neither behave as before.
-
-- `Round.MaxRounds int`: 0 means no limit. When a round finished with all its calls run, did not end (no terminal call, at least one call) and the requests sent have reached `MaxRounds`, `Run` returns `*RoundLimitError{Rounds}` with a Result whose `Input`, `Response` and `Requests` describe the last round (`Ending` empty). A terminal or no-call ending on the limit round is a normal result.
-- `Hooks.Progress func(ctx, round int) (string, error)`: nil disables the no-progress stop. It is called after each round that did not end, with the 1-based round number, and returns a progress fingerprint. An error stops the run and is returned unchanged.
-- `const NoProgressRounds = 3`: when that many consecutive rounds return an identical fingerprint, `Run` returns `*NoProgressError{Rounds, Fingerprint}` (e.g. `[1 2 3]`) with the Result populated as above. A differing fingerprint resets the count.
-- Order after a continuing round: Progress hook, no-progress check, round-limit check; no-progress wins when both trigger.
-
 ### Input window budget (Go library)
 
 `InputBudgetBytes int` on `loop.FailOverBudget` and `loop.Direct` is a library-only lower-only option: no task JSON field, CLI flag or `SessionConfig` option exists. Zero keeps today's inclusive 524288-byte ceiling. A nonzero value must be in [65536, 524288]; negatives and out-of-range values return `loop/invalid_task` (exit 2) naming `InputBudgetBytes` and the range, before anything is sent. `FailOverBudget.Prepare` and `Direct`, which always applies it, validate it.

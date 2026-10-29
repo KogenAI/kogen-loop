@@ -108,9 +108,7 @@ func TestQueuedLeversRemoved(t *testing.T) {
 	}{
 		{reflect.TypeOf(provider.Client{}), "Cache"},
 		{reflect.TypeOf(provider.Request{}), "ToolChoice"},
-		{reflect.TypeOf(loop.Round{}), "MaxRounds"},
 		{reflect.TypeOf(loop.Round{}), "Terminal"},
-		{reflect.TypeOf(loop.Hooks{}), "Progress"},
 		{reflect.TypeOf(loop.SessionConfig{}), "Terminal"},
 		{reflect.TypeOf(tools.Tools{}), "ShellTimeout"},
 		{reflect.TypeOf(tools.Tools{}), "Enabled"},

@@ -85,18 +85,6 @@ func TestNoCallEndsRound(t *testing.T) {
 		}
 	})
 
-	t.Run("round_limit", func(t *testing.T) {
-		rq := &scriptRequester{script: [][]map[string]any{call("custom"), prose("b")}}
-		h := Hooks{HandleCall: func(_ context.Context, _ tools.Call) (Handled, error) {
-			return Handled{Handled: true}, nil
-		}}
-		_, err := Run(ctx, Round{MaxRounds: 1}, start, rq, h)
-		var rl *RoundLimitError
-		if !errors.As(err, &rl) || len(rq.requests) != 1 {
-			t.Fatalf("limit: %v %d", err, len(rq.requests))
-		}
-	})
-
 	t.Run("session_events", func(t *testing.T) {
 		var n atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
