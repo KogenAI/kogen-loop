@@ -178,6 +178,10 @@ round end. A blocking PreToolUse hook on the `Bash` matcher using `ForeignKill` 
 possible but unverified and belongs to a separate item, K-SAFE-2. Kogen cannot see or
 stop what `claude` runs between hooks, or processes that leave the group.
 
+### Root-contained reads
+
+`read_file`, `view_image` and the optional `path` of `list_files` and `search_text` are confined to `tools.Tools.Root` (default path: the root). `~` and `~/...` are refused, not expanded. Absolute paths outside the root, parent escapes and symlinks that leave the root at any component (leaf or intermediate, relative or absolute target) are refused too, with tool text `error: <path>: <reason>` and no outside payload; `Tools.Run` still returns a nil Go error. Relative and absolute paths inside the root work, as do file and directory symlinks whose destinations stay inside it, and a `Root` that is itself a symlink. Symlinks are followed before a later `..` is applied, containment compares path components (not string prefixes), and the file is opened through `os.Root` on the canonical root. This is source-path containment, not a shell sandbox: `shell` and probe commands, documentation URLs, provider credential loading, transcript paths and `write_file` are unchanged, and no credential-specific denylist exists inside the root. There is no option to disable it.
+
 ### Shell time limit
 
 `tools.Tools` has no per-call shell time limit: shell calls are unbounded, the
