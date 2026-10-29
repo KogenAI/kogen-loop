@@ -280,7 +280,7 @@ Every line has `protocol`, `seq` (1-based, gapless), `time` (RFC 3339 UTC) and `
 | `response` | `n`, `response_id`, `usage` (`api.Usage`) |
 | `tool.call` | `call_id`, `name`, `arguments_sha256` |
 | `tool.result` | `call_id`, `name`, `result_sha256`, `bytes`, `cut` (bool), and `rule` only for a refused shell call. `bytes` and `result_sha256` describe what the model received, after the cut. |
-| `round.ended` | `ending` (`terminal`/`no_call`), `terminal_tool`, `claim` (terminal arguments or final text, bounded 16384 bytes; **a claim, not proof**), `requests`, `usage` (round total) |
+| `round.ended` | `ending` (`terminal`/`no_call`), `terminal_tool`, `claim` (terminal arguments or final text — `output_text` and `refusal` parts in content order, newline-joined — bounded 16384 bytes; **a claim, not proof**), `requests`, `usage` (round total) |
 | `error` | `class`, `reason`, `detail` (same shape as `sys.Error`) |
 | `session.ended` | `status` (`ended`/`failed`/`interrupted`), `exit` |
 
