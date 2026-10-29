@@ -126,8 +126,9 @@ func TestL5StreamRetry(t *testing.T) {
 	})
 	t.Run("budget_spent_during_wait", func(t *testing.T) {
 		e, f := keyEnv(t, "anthropic", l5Err("overloaded_error"), l5Err("overloaded_error"), claudeText("never"))
-		_, err := e.c.Respond(context.Background(), e.s, Request{Role: claudeRole, Instructions: "p", Input: user("x"), Budget: 2300 * time.Millisecond}, nil)
-		if se := mustErr(t, err); se.Detail != "Anthropic response wait exceeded 30 minutes" || len(f.requests()) != 2 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second, 300 * time.Millisecond}) {
+		e.c.ResponseBudget = 3 * time.Second
+		_, err := e.c.Respond(context.Background(), e.s, Request{Role: claudeRole, Instructions: "p", Input: user("x")}, nil)
+		if se := mustErr(t, err); se.Detail != "Anthropic response wait exceeded 3s" || len(f.requests()) != 2 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second, time.Second}) {
 			t.Fatalf("%v, %d requests, slept %v", err, len(f.requests()), e.clk.slept())
 		}
 	})

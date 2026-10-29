@@ -9,7 +9,7 @@ Feature: Lower-only provider client response budgets
       | test                                |
       | TestClientResponseBudgetDefault     |
       | TestClientResponseBudgetValidation  |
-      | TestClientResponseBudgetPrecedence  |
+      | TestClientResponseBudgetSelection   |
       | TestClientResponseBudgetStall       |
       | TestClientResponseBudgetAbsolute    |
       | TestClientResponseBudgetDiagnostic  |

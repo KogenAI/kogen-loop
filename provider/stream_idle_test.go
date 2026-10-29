@@ -265,7 +265,6 @@ func TestStreamIdleAbsoluteBudget(t *testing.T) {
 	for _, wire := range []string{"chatgpt", "anthropic"} {
 		t.Run(wire+"/progress cannot renew", func(t *testing.T) {
 			e, tr, req := idleEnv(t, wire, obsAttempt{steps: streamingFor(wire, 20)}, obsAttempt{steps: streamingFor(wire, 20)})
-			req.Budget = 10 * time.Minute
 			obs := &observer{}
 			_, err := respondIdle(t, e, req, obs)
 			if err == nil || !strings.Contains(idleText(err), "response wait exceeded 30 minutes") || tr.next != 1 || len(e.clk.slept()) != 0 {
@@ -290,7 +289,7 @@ func TestStreamIdleAbsoluteBudget(t *testing.T) {
 			}
 			silent := obsAttempt{steps: []obsStep{{advance: first, data: "x"}}}
 			e, tr, req := idleEnv(t, wire, silent, obsAttempt{steps: streamingFor(wire, 20)}, obsAttempt{steps: streamingFor(wire, 20)})
-			req.Budget = 5 * time.Minute
+			e.c.ResponseBudget = 5 * time.Minute
 			obs := &observer{}
 			_, err := respondIdle(t, e, req, obs)
 			if err == nil || !strings.Contains(idleText(err), "response wait exceeded") || tr.next != 2 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second}) {
@@ -315,7 +314,7 @@ func TestStreamIdleAbsoluteBudget(t *testing.T) {
 				{"headers", obsAttempt{headersAdvance: idleFirst(wire), steps: []obsStep{{data: "x"}}}},
 			} {
 				e, tr, req := idleEnv(t, wire, c.a, c.a)
-				req.Budget = idleFirst(wire)
+				e.c.ResponseBudget = idleFirst(wire)
 				obs := &observer{}
 				_, err := respondIdle(t, e, req, obs)
 				if err == nil || !strings.Contains(idleText(err), "response wait exceeded") || strings.Contains(idleText(err), "no first byte") || tr.next != 1 {
@@ -401,7 +400,7 @@ func TestStreamIdleCompatibility(t *testing.T) {
 			return names
 		}
 		wantClient := []string{"HTTP", "Now", "Sleep", "Cache", "PrefixLog", "Locker", "Input", "Version", "ResponseBudget"}
-		wantRequest := []string{"Role", "Instructions", "Input", "Tools", "DisableParallelToolCalls", "ToolChoice", "AuthorityBoundary", "AnthropicCacheTTL", "Budget", "Single", "CacheID", "Scope", "Cache", "Context"}
+		wantRequest := []string{"Role", "Instructions", "Input", "Tools", "DisableParallelToolCalls", "ToolChoice", "AuthorityBoundary", "Single", "CacheID", "Scope", "Cache", "Context"}
 		if got := exported(Client{}); !reflect.DeepEqual(got, wantClient) {
 			t.Errorf("Client options = %v, want %v", got, wantClient)
 		}

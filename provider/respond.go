@@ -36,15 +36,6 @@ type Request struct {
 	// cache breakpoint there (at most four in all). Nil sends today's exact bytes; other
 	// routes ignore it.
 	AuthorityBoundary *int
-	// AnthropicCacheTTL is the lifetime of every cache breakpoint the Messages wire creates
-	// (tools, system, newest message and the AuthorityBoundary marker). Empty sends today's
-	// exact bytes (the default five-minute lifetime); "1h" adds ttl "1h" to each; any other
-	// value is refused by Render and Respond with provider/invalid_request before transport.
-	// Other routes ignore it, whatever its value.
-	AnthropicCacheTTL string
-	// Budget caps the logical call's absolute wait; zero or more than ResponseBudget means
-	// ResponseBudget.
-	Budget time.Duration
 	// Single makes ChatGPT attempts single-shot: no retry of transient or unreadable
 	// answers and no refresh after a 401 (the other providers keep their retries).
 	Single bool
@@ -194,7 +185,7 @@ func (c *Client) Body(req Request) map[string]any {
 // Respond sends one request and returns the validated answer. Provider failures are
 // *sys.Error (class provider, exit 4, reason context_too_long when the conversation no
 // longer fits); an interrupt is *sys.Interrupted. One logical call has a 30-minute
-// budget (lowerable by Client.ResponseBudget and Request.Budget) shared by credentials, refresh, retries and backoff (GPT-8).
+// budget (lowerable by Client.ResponseBudget) shared by credentials, refresh, retries and backoff (GPT-8).
 func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs Observer) (*Response, error) {
 	info, ok := Lookup(req.Role.Provider)
 	if !ok {
@@ -209,9 +200,6 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 			return nil, sys.Fail("provider", "refused", "response budget must be zero or between 1s and 30m0s", 4)
 		}
 		budget = c.ResponseBudget
-	}
-	if req.Budget > 0 && req.Budget < budget {
-		budget = req.Budget
 	}
 	if info.compatible() && req.Role.BaseURL == "" {
 		return nil, sys.Fail("provider", "refused", "openai-compatible needs base_url in .kogen/project.yaml", 4)
@@ -245,9 +233,6 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 	}
 	_, hasKey := rend.body["prompt_cache_key"]
 	ev := newEvidence(id, rend.mode, rend.boundaries, unsupported, req.Instructions, req.Input, req.Tools)
-	if rend.ttl != "" {
-		ev.cache["configured_ttl"] = rend.ttl
-	}
 	r := &run{k: k, req: req, obs: obs, cache: cache, key: key, state: st, rend: rend, encoded: encoded,
 		hasKey: hasKey && (info.supergrok() || info.chatgpt()), model: req.Role.Model,
 		ev: ev,

@@ -447,8 +447,9 @@ func TestSuperGrokBudgetMessage(t *testing.T) {
 	f := newFake(t, httpFail(500, "e", "x"))
 	e := newEnv(t, f)
 	e.saveCreds("supergrok", e.supergrokCreds())
-	_, err := e.respond(Request{Role: grokRole, Budget: time.Second})
-	if se := mustErr(t, err); se.Detail != "SuperGrok response wait exceeded 30 minutes" || se.Reason != "unavailable" {
+	e.c.ResponseBudget = time.Second
+	_, err := e.respond(Request{Role: grokRole})
+	if se := mustErr(t, err); se.Detail != "SuperGrok response wait exceeded 1s" || se.Reason != "unavailable" {
 		t.Fatalf("err = %v", se)
 	}
 }

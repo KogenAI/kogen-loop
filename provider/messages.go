@@ -3,7 +3,6 @@ package provider
 import (
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -18,34 +17,17 @@ const (
 	maxTokens        = 128000
 )
 
-// CacheTTLHour is the one nonempty Request.AnthropicCacheTTL value: a one-hour breakpoint.
-const CacheTTLHour = "1h"
-
 // ephemeral is the default five-minute cache breakpoint.
 func ephemeral() map[string]any { return map[string]any{"type": "ephemeral"} }
-
-// breakpoint is the cache_control object for the request's TTL: the default object when
-// ttl is empty, otherwise ephemeral with that ttl.
-func breakpoint(ttl string) map[string]any {
-	b := ephemeral()
-	if ttl != "" {
-		b["ttl"] = ttl
-	}
-	return b
-}
 
 func renderMessages(info Info, req Request, id string, input []any) (rendered, error) {
 	if hasImage(input) {
 		return rendered{}, imageRefusal(info)
 	}
-	if req.AnthropicCacheTTL != "" && req.AnthropicCacheTTL != CacheTTLHour {
-		return rendered{}, providerFail("invalid_request", "invalid AnthropicCacheTTL "+strconv.Quote(req.AnthropicCacheTTL)+": leave it empty or use \""+CacheTTLHour+"\"")
-	}
-	ttl := req.AnthropicCacheTTL
 	messages := anthropicMessages(input, req.AuthorityBoundary != nil)
 	var authority string
 	if req.AuthorityBoundary != nil {
-		where, err := markAuthority(messages, *req.AuthorityBoundary, ttl)
+		where, err := markAuthority(messages, *req.AuthorityBoundary)
 		if err != nil {
 			return rendered{}, err
 		}
@@ -71,7 +53,7 @@ func renderMessages(info Info, req Request, id string, input []any) (rendered, e
 			tools[i] = map[string]any{"name": m["name"], "description": m["description"], "input_schema": m["parameters"]}
 		}
 		last := tools[len(tools)-1].(map[string]any)
-		last["cache_control"] = breakpoint(ttl)
+		last["cache_control"] = ephemeral()
 		boundaries = append(boundaries, "tools["+itoa(int64(len(tools)-1))+"]")
 		choice := "auto"
 		if p := ResolveProfile(req.Role); p != nil {
@@ -87,12 +69,12 @@ func renderMessages(info Info, req Request, id string, input []any) (rendered, e
 		body["tool_choice"] = toolChoice
 		body["tools"] = tools
 	}
-	body["system"] = []any{map[string]any{"type": "text", "text": req.Instructions, "cache_control": breakpoint(ttl)}}
+	body["system"] = []any{map[string]any{"type": "text", "text": req.Instructions, "cache_control": ephemeral()}}
 	boundaries = append(boundaries, "system[0]")
 	if authority != "" {
 		boundaries = append(boundaries, authority)
 	}
-	if where, ok := markNewest(messages, req.AuthorityBoundary != nil, ttl); ok && where != authority {
+	if where, ok := markNewest(messages, req.AuthorityBoundary != nil); ok && where != authority {
 		boundaries = append(boundaries, where)
 	}
 	body["messages"] = messages
@@ -101,14 +83,14 @@ func renderMessages(info Info, req Request, id string, input []any) (rendered, e
 			return rendered{}, providerFail("invalid_request", "cache breakpoint limit exceeded: "+itoa(int64(n))+" cache_control locations, at most "+itoa(maxBreakpoints)+" allowed")
 		}
 	}
-	return rendered{body: body, mode: "explicit", boundaries: boundaries, ttl: ttl}, nil
+	return rendered{body: body, mode: "explicit", boundaries: boundaries}, nil
 }
 
 const maxBreakpoints = 4
 
 // markAuthority puts the authority breakpoint on text block index of the first user message
 // (a string content is block 0). The message is replaced by a copy in messages.
-func markAuthority(messages []any, index int, ttl string) (string, error) {
+func markAuthority(messages []any, index int) (string, error) {
 	invalid := func(why string) error {
 		return providerFail("invalid_request", "invalid authority boundary: "+why)
 	}
@@ -134,7 +116,7 @@ func markAuthority(messages []any, index int, ttl string) (string, error) {
 		}
 		nb := copyMap(b)
 		if nb["cache_control"] == nil {
-			nb["cache_control"] = breakpoint(ttl)
+			nb["cache_control"] = ephemeral()
 		}
 		blocks[index] = nb
 		nm := copyMap(msg)
@@ -170,7 +152,7 @@ func countBreakpoints(body map[string]any) int {
 // markNewest puts the rolling breakpoint on the last content block of the newest message
 // (a string content becomes one text block); thinking blocks cannot carry one. The message
 // is replaced by a copy: the caller's replay items are never modified.
-func markNewest(messages []any, preserveMarker bool, ttl string) (string, bool) {
+func markNewest(messages []any, preserveMarker bool) (string, bool) {
 	if len(messages) == 0 {
 		return "", false
 	}
@@ -197,7 +179,7 @@ func markNewest(messages []any, preserveMarker bool, ttl string) (string, bool) 
 		nb[k] = v
 	}
 	if !preserveMarker || nb["cache_control"] == nil {
-		nb["cache_control"] = breakpoint(ttl)
+		nb["cache_control"] = ephemeral()
 	}
 	blocks[j] = nb
 	nm := make(map[string]any, len(msg))

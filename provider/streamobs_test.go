@@ -404,7 +404,7 @@ func TestStreamObsEndReasons(t *testing.T) {
 					attempts = append(attempts, obsAttempt{steps: []obsStep{{advance: ms1, data: head + tail}}})
 				}
 				tr.attempts = attempts
-				req.Budget = sc.budget
+				e.c.ResponseBudget = sc.budget
 				obs := &observer{}
 				_, err := e.c.Respond(ctx, e.s, req, obs)
 				if sc.err == "" && err != nil || sc.err != "" && (err == nil || !strings.Contains(err.Error()+" "+jsonOfErr(err), sc.err)) {
