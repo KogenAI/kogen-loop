@@ -36,6 +36,12 @@ type Request struct {
 	// cache breakpoint there (at most four in all). Nil sends today's exact bytes; other
 	// routes ignore it.
 	AuthorityBoundary *int
+	// AnthropicCacheTTL is the lifetime of every cache breakpoint the Messages wire creates
+	// (tools, system, newest message and the AuthorityBoundary marker). Empty sends today's
+	// exact bytes (the default five-minute lifetime); "1h" adds ttl "1h" to each; any other
+	// value is refused by Render and Respond with provider/invalid_request before transport.
+	// Other routes ignore it, whatever its value.
+	AnthropicCacheTTL string
 	// Budget caps the logical call's absolute wait; zero or more than ResponseBudget means
 	// ResponseBudget.
 	Budget time.Duration
@@ -236,9 +242,13 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 			" bytes exceeds "+itoa(int64(limit))+"; reserve 131072 tokens. Retain private source/replay; use external image preparation or ordinary Refine and new approval.", 1)
 	}
 	_, hasKey := rend.body["prompt_cache_key"]
+	ev := newEvidence(id, rend.mode, rend.boundaries, unsupported, req.Instructions, req.Input, req.Tools)
+	if rend.ttl != "" {
+		ev.cache["configured_ttl"] = rend.ttl
+	}
 	r := &run{k: k, req: req, obs: obs, cache: cache, key: key, state: st, rend: rend, encoded: encoded,
 		hasKey: hasKey && (info.supergrok() || info.chatgpt()), model: req.Role.Model,
-		ev: newEvidence(id, rend.mode, rend.boundaries, unsupported, req.Instructions, req.Input, req.Tools),
+		ev: ev,
 		op: operation{id: newID("operation"), timestamp: timestamp(c.now()), model: req.Role.Model, effort: req.Role.Effort}}
 	var resp *Response
 	if req.Single && info.chatgpt() {

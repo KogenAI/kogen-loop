@@ -191,9 +191,20 @@ Both stops are optional and caller-enabled; neither has a default (no default `M
 
 - Default: nil (off) sends today's exact request bytes on every route. Other routes (Responses, Chat Completions) ignore the option even when set.
 - Non-nil is a zero-based content block index in the first user message; a string content is block 0. On the Messages wire the block gets one extra `cache_control` marker, on the selected last stable authority block rather than the dynamic evidence after it. Ordinary text blocks keep their boundaries; raw `anthropic_message` blocks retain theirs. The caller's input is never modified.
-- TTL policy is that of the existing breakpoints: implicit five minutes, no explicit `ttl`. This adds no TTL feature.
+- TTL policy is that of the existing breakpoints (five minutes, no explicit `ttl`) unless `AnthropicCacheTTL` selects one hour (see below).
 - Distinct final `cache_control` locations across tools, system and messages (including retained raw markers) are counted. A target that is already the newest-message marker or already marked is not counted twice. More than four is refused with `cache breakpoint limit exceeded`; markers are never silently dropped.
 - Preflight errors, before any HTTP request: a negative or out-of-range index, no user message or a non-text target return a provider `invalid_request` error containing `invalid authority boundary`. The validation applies only when enabled.
+
+### Anthropic cache breakpoint TTL (Go library, Messages wire)
+
+`AnthropicCacheTTL string` on `provider.Request` is a provider-only, per-request research option: no task JSON field, CLI flag or loop option exists. It enables an experiment; it measures no savings and claims no benefit.
+
+- Default: empty sends today's exact request bytes, every `cache_control` being `{"type":"ephemeral"}` (five minutes).
+- `1h` is the only accepted nonempty value on the Anthropic Messages wire. Every breakpoint the provider creates (last tool when present, `system[0]`, the newest message's last eligible block and the optional `AuthorityBoundary` marker) becomes `{"type":"ephemeral","ttl":"1h"}`. Placement, the four-breakpoint limit, input immutability and raw native replay are unchanged; the fourth marker uses the same TTL so a shorter lifetime never precedes a longer one.
+- Any other nonempty value, including `5m` and `2h`, is refused by `Render` and `Respond` with `provider/invalid_request`, a detail naming `AnthropicCacheTTL`, before any credential lookup or HTTP request.
+- Other routes (Responses, Chat Completions) ignore the option, even an invalid value; their bytes and diagnostics are unchanged.
+- Diagnostics: the Anthropic attempt record's `cache.configured_ttl` is `"1h"` when selected and null otherwise. `applied_ttl` stays null (unknown): configuration is not evidence of observed retention.
+- Headers are unchanged (`anthropic-version` `2026-10-21`); no TTL beta header is added, since the retrieved one-hour guidance prescribes `ttl` only.
 
 ### Process-group sweep and foreign-kill refusal (Go library)
 

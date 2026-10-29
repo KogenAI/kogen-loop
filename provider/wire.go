@@ -8,6 +8,8 @@ type rendered struct {
 	// mode and boundaries describe the cache controls the request carries.
 	mode       any
 	boundaries []any
+	// ttl is the explicit breakpoint lifetime configured on the Messages wire; empty is the default.
+	ttl string
 }
 
 // render writes the request for the provider's wire: the frozen front (instructions, tools
