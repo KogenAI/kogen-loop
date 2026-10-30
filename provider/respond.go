@@ -594,6 +594,7 @@ func (r *run) exchangeResponses(token string) (result, error) {
 	r.so.beginStream()
 	acc := newAccumulator()
 	buf := make([]byte, 32<<10)
+	total := 0
 	for {
 		if err := k.check(); err != nil {
 			r.so.finishCheck(k)
@@ -604,6 +605,9 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		r.so.read(at, n)
 		if w.observe(at, n) {
 			return r.idleStop(ctx, w)
+		}
+		if total += n; total > streamLimit {
+			return r.overflow(), nil
 		}
 		if n > 0 {
 			detail := acc.feed(string(buf[:n]))
@@ -641,6 +645,18 @@ func (r *run) exchangeResponses(token string) (result, error) {
 			return r.transportFailure(ctx, rerr)
 		}
 	}
+}
+
+// streamLimit is the most body bytes one streaming attempt may receive: framing, comments and
+// unfinished frames count, and exactly the limit is allowed. It is fixed, not an option.
+const streamLimit = 64 << 20
+
+// overflow ends an attempt whose stream passed streamLimit. The caller has not appended or parsed
+// the overflowing read; the deferred body close ends the transfer. The answer is unreadable, not
+// an end of stream, and no partial output is kept.
+func (r *run) overflow() result {
+	r.so.finish("transport")
+	return result{kind: resInvalid, detail: "stream exceeded " + itoa(streamLimit) + " bytes"}
 }
 
 // exchangeChat is one OpenCode Go request: a JSON POST answered by one JSON body.
@@ -760,6 +776,7 @@ func (r *run) exchangeMessages(key string) (result, error) {
 	var all strings.Builder
 	tail := ""
 	buf := make([]byte, 32<<10)
+	total := 0
 	for {
 		if err := k.check(); err != nil {
 			r.so.finishCheck(k)
@@ -770,6 +787,9 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		r.so.read(at, n)
 		if w.observe(at, n) {
 			return r.idleStop(ctx, w)
+		}
+		if total += n; total > streamLimit {
+			return r.overflow(), nil
 		}
 		if n > 0 {
 			chunk := string(buf[:n])
