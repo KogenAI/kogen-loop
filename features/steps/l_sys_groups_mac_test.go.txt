@@ -1,0 +1,81 @@
+package sys
+
+// Acceptance fixture for l-sys-groups-mac, overlaid into package sys by
+// features/steps/l_sys_groups_mac.js. Each observation runs in a fresh helper
+// process that leads its own process group, so the ps listing that
+// psGroupOthers starts is born into the observed group.
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
+	"testing"
+)
+
+const lsgmName = "TestLSysGroupsMacAcceptance"
+
+type lsgmObservation struct {
+	Others bool   `json:"others"`
+	Error  string `json:"error"`
+}
+
+// lsgmObserve asks psGroupOthers about this helper's own group: alone, or with a
+// live sleep child that inherited the group.
+func lsgmObserve(mode string) lsgmObservation {
+	if mode == "member" {
+		member := exec.Command("sleep", "600")
+		if err := member.Start(); err != nil {
+			return lsgmObservation{Error: "start member: " + err.Error()}
+		}
+		defer func() { member.Process.Kill(); member.Wait() }()
+	}
+	others, err := psGroupOthers(syscall.Getpgrp(), os.Getpid())
+	o := lsgmObservation{Others: others}
+	if err != nil {
+		o.Error = err.Error()
+	}
+	return o
+}
+
+func TestLSysGroupsMacAcceptance(t *testing.T) {
+	if mode := os.Getenv("LSGM_HELPER"); mode != "" {
+		b, _ := json.Marshal(lsgmObserve(mode))
+		fmt.Println("LSGM-HELPER " + string(b))
+		return
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "LSGM_HELPER=") && !strings.HasPrefix(kv, "PROC_TEST_HELPER=") {
+			env = append(env, kv)
+		}
+	}
+	payload := map[string]lsgmObservation{}
+	for _, mode := range []string{"alone", "member"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^"+lsgmName+"$", "-test.count=1")
+		cmd.Env = append(env, "LSGM_HELPER="+mode)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper %s: %v\n%s", mode, err, out)
+		}
+		var lines []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "LSGM-HELPER ") {
+				lines = append(lines, strings.TrimPrefix(line, "LSGM-HELPER "))
+			}
+		}
+		if len(lines) != 1 {
+			t.Fatalf("helper %s printed %d observations:\n%s", mode, len(lines), out)
+		}
+		var o lsgmObservation
+		if err := json.Unmarshal([]byte(lines[0]), &o); err != nil {
+			t.Fatalf("helper %s: %v", mode, err)
+		}
+		payload[mode] = o
+	}
+	b, _ := json.Marshal(payload)
+	fmt.Println("LSGM " + string(b))
+}
