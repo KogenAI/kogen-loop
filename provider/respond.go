@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"kogen-loop/internal/delivery"
 	"kogen-loop/sys"
 )
 
@@ -116,8 +117,9 @@ type run struct {
 	requestID   string
 	cacheStatus string
 	respMeta    map[string]any
-	so          *streamObs // the current attempt's stream observations
-	watch       *idleWatch // the current attempt's first-byte and idle timer
+	so          *streamObs    // the current attempt's stream observations
+	watch       *idleWatch    // the current attempt's first-byte and idle timer
+	sink        delivery.Sink // the engine's early-delivery bridge, nil when there is none
 }
 
 type operation struct {
@@ -238,7 +240,7 @@ func (c *Client) Respond(ctx context.Context, s *sys.Session, req Request, obs O
 	ev := newEvidence(id, rend.mode, rend.boundaries, unsupported, req.Instructions, req.Input, req.Tools)
 	r := &run{k: k, req: req, obs: obs, cache: cache, key: key, state: st, rend: rend, encoded: encoded,
 		hasKey: hasKey && (info.supergrok() || info.chatgpt()), model: req.Role.Model,
-		ev: ev,
+		ev: ev, sink: delivery.From(ctx),
 		op: operation{id: newID("operation"), timestamp: timestamp(c.now()), model: req.Role.Model, effort: req.Role.Effort}}
 	var resp *Response
 	if req.Single && info.chatgpt() {
@@ -484,8 +486,15 @@ func (r *run) transport(token string) (result, error) {
 	r.requestID = ""
 	r.so = newStreamObs(start)
 	r.watch = nil
+	if r.sink != nil {
+		r.sink.Attempt()
+	}
 	res, err := r.exchange(token)
 	r.watch = nil
+	if r.sink != nil && (err != nil || res.kind != resOK) {
+		// A failed attempt leaves nothing running and nothing staged before any retry.
+		r.sink.Abort()
+	}
 	if err == nil && res.kind == resError && r.refused(res.fail) {
 		// The refusal is evidence of the route, whatever happens next.
 		r.markUnsupported()
@@ -600,6 +609,7 @@ func (r *run) exchangeResponses(token string) (result, error) {
 	r.so.beginStream()
 	scan := &sseProgress{}
 	acc := newAccumulator()
+	acc.sink = r.sink
 	buf := make([]byte, 32<<10)
 	total := 0
 	for {
@@ -793,6 +803,10 @@ func (r *run) exchangeMessages(key string) (result, error) {
 	r.so.beginStream()
 	scan := &sseProgress{messages: true}
 	var all strings.Builder
+	var early *earlyCalls
+	if r.sink != nil {
+		early = newEarlyCalls(r.sink)
+	}
 	tail := ""
 	buf := make([]byte, 32<<10)
 	total := 0
@@ -821,6 +835,9 @@ func (r *run) exchangeMessages(key string) (result, error) {
 			tail = pieces[len(pieces)-1]
 			for _, p := range pieces[:len(pieces)-1] {
 				f := decodeFrame(p)
+				if early != nil {
+					early.frame(f)
+				}
 				if f.event == nil {
 					continue
 				}

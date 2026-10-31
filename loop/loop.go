@@ -14,6 +14,7 @@ import (
 	"slices"
 
 	"kogen-loop/api"
+	"kogen-loop/internal/delivery"
 	"kogen-loop/provider"
 	"kogen-loop/sys"
 	"kogen-loop/tools"
@@ -174,6 +175,12 @@ var DefaultTerminal = []string{"finish"}
 //  6. No terminal call and at least one call: input = input ++ outs and go to 1.
 //  7. Otherwise return the Result.
 //
+// Without AfterResponse, BeforeCall, HandleCall and AfterCall hooks (BeforeRequest alone does
+// not count) steps 2 to 5 overlap: a complete streamed call starts as soon as no earlier call
+// can conflict with it, independent calls run concurrently and the response is published
+// only when it validated and every call finished, in original call order (see stage). With
+// any of those hooks the order above holds exactly.
+//
 // Calls after a terminal call in the same batch still run. A hook error, a tool interrupt
 // (a shell stopped by the caller), timeout observation failure or a cancelled context
 // stops the round; the error is
@@ -198,6 +205,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 		}
 		defer custody(rd.Tools.Session)()
 	}
+	unhooked := h.AfterResponse == nil && h.BeforeCall == nil && h.HandleCall == nil && h.AfterCall == nil
 	requests := 0
 	for {
 		if h.BeforeRequest != nil {
@@ -206,10 +214,20 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 			}
 		}
 		requests++
-		resp, sent, err := rq.Request(ctx, Request{
+		// Without response or call hooks the response's calls run while it streams.
+		var st *stage
+		rctx := ctx
+		if unhooked {
+			st = newStage(ctx, rd.Tools, terminal)
+			rctx = delivery.With(ctx, st)
+		}
+		resp, sent, err := rq.Request(rctx, Request{
 			Owner: rd.Owner, Role: rd.Role, Instructions: rd.Instructions, Input: input, Tools: rd.Definitions,
 		})
 		if err != nil {
+			if st != nil {
+				st.close()
+			}
 			return Result{}, err
 		}
 		if h.AfterResponse != nil {
@@ -221,7 +239,21 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 		calls := tools.Calls(resp.Items)
 		var outs []any
 		var last *tools.Call
-		for i := range calls {
+		if st != nil {
+			results, err := st.finish(calls)
+			if err != nil {
+				return Result{}, err
+			}
+			for i, call := range calls {
+				if slices.Contains(terminal, call.Name) {
+					last = &calls[i]
+				} else {
+					outs = append(outs, call.Output(results[i]))
+				}
+			}
+		}
+		// Hooked rounds replay the validated response first, then run the calls serially.
+		for i := 0; st == nil && i < len(calls); i++ {
 			call := calls[i]
 			if err := ctx.Err(); err != nil {
 				return Result{}, err
