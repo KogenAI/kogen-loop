@@ -204,6 +204,7 @@ func Run(ctx context.Context, rd Round, input []any, rq Requester, h Hooks) (res
 			rd.Tools = &t
 		}
 		defer custody(rd.Tools.Session)()
+		defer rd.Tools.EndShellRound()
 	}
 	unhooked := h.AfterResponse == nil && h.BeforeCall == nil && h.HandleCall == nil && h.AfterCall == nil
 	requests := 0

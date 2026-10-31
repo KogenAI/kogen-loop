@@ -362,7 +362,7 @@ func TestDeadlineEndsAHangingRequest(t *testing.T) {
 
 func TestDeadlineTerminatesARunningShellGroup(t *testing.T) {
 	w := newWorld(t).signIn()
-	f := newFakeProvider(t, []exchange{{Items: []map[string]any{call("c1", "shell", map[string]any{"command": sleeper})}}})
+	f := newFakeProvider(t, []exchange{{Items: []map[string]any{call("c1", "shell", map[string]any{"command": sleeper})}}, {Hang: true}})
 	p := startCLI(t, w, f, mustJSON(t, w.task(map[string]any{"deadline_seconds": 3})), "run", "--task", "-")
 	pidSh := readPid(t, filepath.Join(w.root, "pid-sh"))
 	pidSleep := readPid(t, filepath.Join(w.root, "pid-sleep"))

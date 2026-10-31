@@ -376,7 +376,7 @@ func TestContextEndTerminatesTheShellGroupBeforeRunReturns(t *testing.T) {
 	rq := &scripted{responses: []*provider.Response{
 		respond("r1", fakeCall("c1", "shell", fmt.Sprintf(`{"command":%q}`, sleeper))),
 	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {

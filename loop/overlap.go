@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sync"
@@ -82,6 +83,22 @@ func (s *stage) retire(closed bool) {
 	s.mu.Unlock()
 	old.cancel()
 	old.wg.Wait()
+	// A yielded call has returned, but its process is still owned by this attempt.
+	// Discarded streaming attempts must stop it before a retry starts.
+	if s.tl != nil {
+		for _, sl := range old.slots {
+			if sl.call.Name != tools.ShellTool {
+				continue
+			}
+			var result struct {
+				Status string `json:"status"`
+				Handle string `json:"handle"`
+			}
+			if json.Unmarshal([]byte(sl.out.Text), &result) == nil && result.Status == "running" && result.Handle != "" {
+				s.tl.CancelShellHandle(result.Handle)
+			}
+		}
+	}
 }
 
 // Attempt implements delivery.Sink.
