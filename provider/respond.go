@@ -378,7 +378,8 @@ func (r *run) single() (*Response, error) {
 	return nil, providerFail("invalid_response", res.detail)
 }
 
-// attempts is the retrying mode: up to 3 transport attempts with 2 s then 8 s waits, one
+// attempts is the retrying mode: up to 3 transport attempts with 2 s then 8 s waits (or the
+// advertised Retry-After of a 429 or 503, up to 60 s; a longer one ends the call), one
 // retry of an unreadable answer, one refresh and retry after a 401 (never for an API key,
 // never for a key provider's unreadable answer).
 func (r *run) attempts() (*Response, error) {
@@ -421,6 +422,12 @@ func (r *run) attempts() (*Response, error) {
 			wait := 2 * time.Second
 			if n > 1 {
 				wait = 8 * time.Second
+			}
+			if a := res.after; a != nil {
+				if a.wait > maxRetryAfter {
+					return nil, r.unavailable(r.label()+" asked to wait "+a.secs+" s before retrying, more than the 60 s limit: "+res.detail, res.diag)
+				}
+				wait = a.wait
 			}
 			if err := r.k.pause(wait); err != nil {
 				return nil, err
@@ -604,7 +611,7 @@ func (r *run) exchangeResponses(token string) (result, error) {
 		if err := k.check(); err != nil {
 			return result{}, err
 		}
-		return httpFailure(resp.StatusCode, body, k.info.supergrok(), token), nil
+		return k.withRetryAfter(httpFailure(resp.StatusCode, body, k.info.supergrok(), token), resp), nil
 	}
 	r.so.beginStream()
 	scan := &sseProgress{}
@@ -741,7 +748,7 @@ func (r *run) exchangeChat(key string) (result, error) {
 	case status == 200:
 		return adaptChat(k.info, response), nil
 	case status == 429 || status >= 500:
-		return result{kind: resTransient, detail: k.info.Label + " temporary HTTP " + itoa(int64(status)), diag: f.diagnostics()}, nil
+		return k.withRetryAfter(result{kind: resTransient, detail: k.info.Label + " temporary HTTP " + itoa(int64(status)), diag: f.diagnostics()}, resp), nil
 	case status == 401:
 		return result{kind: resUnauthorized, fail: f}, nil
 	}
@@ -798,7 +805,7 @@ func (r *run) exchangeMessages(key string) (result, error) {
 		if err := k.check(); err != nil {
 			return result{}, err
 		}
-		return messagesFailure(resp.StatusCode, body, key), nil
+		return k.withRetryAfter(messagesFailure(resp.StatusCode, body, key), resp), nil
 	}
 	r.so.beginStream()
 	scan := &sseProgress{messages: true}

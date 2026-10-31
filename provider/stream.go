@@ -35,6 +35,7 @@ type result struct {
 	detail string
 	reason string         // resRefused
 	diag   map[string]any // transient: allowlisted failure fields
+	after  *retryAfter    // transient: the answer's usable Retry-After
 	// resError, resUnauthorized and resRefused
 	fail failure
 }
