@@ -65,7 +65,9 @@ At initial adoption, this tree adopted an external reference into a fresh native
 
 Published and pinned baseline observed on 27 October 2026, when this continuation started: public `origin` (`git@github.com:KogenAI/kogen-loop.git`) `main` was `bbf3fdd6d2e79b96eab6af23bcd6d66212893388`, and Kogen `main` at `bb663a593fb3499c2e3c86ffc27847f8ea0860cc` vendored this module through `cli/third_party/kogen-loop`, pinned in `cli/loop-pin.json` with `source_head` `bbf3fdd6d2e79b96eab6af23bcd6d66212893388`, 88 files and digest `4e1332b9f0aa686d76040466a965a43a5169ba9295631cf7bb9b8f62fb946638`. Later commits reach Kogen only when Kogen updates its own vendored copy and pin. This change does not modify Kogen, its vendored copy or its pin, install anything globally or switch a runtime.
 
-Current status, 28 October 2026: see the [CHANGELOG](CHANGELOG.md) for the unreleased v0.1.0 contents; `loop.Version` is `0.1.0-dev`. Commit `c7e8331` fixed two Linux test flakes; both tests passed 50/50 on eu2. No v0.1 tag has been created and nothing is published by this preparation.
+Current status, 28 October 2026: see the [CHANGELOG](CHANGELOG.md) for the unreleased v0.1.0 contents up to commit `07f21da`, and the commit history for later changes; `loop.Version` is `0.1.0-dev`. Commit `c7e8331` fixed two Linux test flakes; both tests passed 50/50 on eu2. No v0.1 tag has been created and nothing is published by this preparation.
+
+Changes are recorded in their commit messages, not in CHANGELOG.md: a change does not add a CHANGELOG.md entry; its commit subject and body state what changed.
 
 Provider/tool/sys bytes deliberately retain compatibility residues: Kogen-named credential paths, user agents, environment variables (`KOGEN_PROVIDER_URL`, `KOGEN_AUTH_URL`, `KOGEN_LOG_LEVEL`, `__kogen_supervise`), catalog metadata, model-facing texts and optional callback seams. They do not give this library ownership of Kogen delivery policy. Generic path prevention and hooks are caller-provided primitives.
 

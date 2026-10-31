@@ -1,5 +1,7 @@
 # Changelog
 
+This file is no longer updated. Its entries end with commit `07f21da` (Continue runs within the request budget). Later changes, and earlier ones not listed below, are recorded in the commit history: each commit's subject and body state what changed, and a `Kogen-Intent: <slug>` trailer names the change's full description in `.kogen/intents/<slug>/intent.md`. List them with `git log`.
+
 ## v0.1.0 (unreleased)
 
 - bbf3fdd Extract the standalone Kogen Loop
