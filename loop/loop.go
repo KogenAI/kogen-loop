@@ -37,7 +37,7 @@ type Requester interface {
 // FailOverBudget measures the complete rendered request and
 // refuses one that exceeds the role's input budget (provider.InputBudgetBytes, or a smaller
 // documented bound of the model family) with loop/context_budget_exceeded, before anything is
-// sent. It never clips the input. Direct always applies it.
+// sent. It never clips the input. Direct applies it to what remains after condensation.
 //
 // Client, Cache and CacheID only make the measured body the body that will be sent (cache
 // identity placement); Direct fills them in. The zero value works on its own.
@@ -81,23 +81,33 @@ func ownerLabel(owner string) string {
 	return owner
 }
 
-// Direct is the provider-backed Requester (provider.Client.Respond) that refuses an
-// over-budget request before sending it, with an optional provider.Observer for attempt records.
+// Direct is the provider-backed Requester (provider.Client.Respond). A request that fits is sent
+// unchanged. An over-budget request is first condensed: older complete exchanges are summarized
+// with bounded summarization requests (same provider, role, credentials and transport, no tools)
+// while instructions, the original task, the user's messages and the recent exchanges stay
+// exact. A request that still cannot fit is refused before sending (FailOverBudget). It takes an
+// optional provider.Observer for attempt records.
 type Direct struct {
 	Client   *provider.Client
 	Session  *sys.Session
 	Observer provider.Observer // nil: none
 	CacheID  string            // one cache identity per conversation (kept across rounds)
 	Cache    *provider.Cache
+	// Condensed, when set, is told about each condensation before the condensed request is sent.
+	Condensed func(Condensation)
+
+	// terminal names the calls whose outputs are the caller's feedback (Session sets it);
+	// condensation keeps those exchanges exact.
+	terminal []string
 }
 
-// Request refuses an over-budget request, then sends it with provider.Client.Respond. It
-// returns the response and the input it sent.
+// Request condenses an over-budget request when it can, refuses one that cannot fit, then
+// sends it with provider.Client.Respond. It returns the response and the input it sent.
 func (d *Direct) Request(ctx context.Context, r Request) (*provider.Response, []any, error) {
 	if d.Session == nil {
 		return nil, nil, provider.ErrMissingSession()
 	}
-	sent, err := FailOverBudget{Client: d.Client, Cache: d.Cache, CacheID: d.CacheID}.Prepare(ctx, r)
+	sent, err := d.prepare(ctx, r)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,6 +123,36 @@ func (d *Direct) Request(ctx context.Context, r Request) (*provider.Response, []
 		return nil, nil, err
 	}
 	return resp, sent, nil
+}
+
+// prepare returns the input to send: r.Input when it fits, else its condensation.
+func (d *Direct) prepare(ctx context.Context, r Request) ([]any, error) {
+	guard := FailOverBudget{Client: d.Client, Cache: d.Cache, CacheID: d.CacheID}
+	if _, ok := provider.Lookup(r.Role.Provider); !ok {
+		return guard.Prepare(ctx, r)
+	}
+	client := d.Client
+	if client == nil {
+		client = provider.NewClient("")
+	}
+	c := &condenser{d: d, client: client, r: r}
+	m, err := c.fits(r.Input)
+	if err != nil {
+		return nil, err
+	}
+	c.limit, c.reserve = m.InputBudgetBytes, m.OutputReserveTokens
+	if m.Fits {
+		return r.Input, nil
+	}
+	if countWork(split(r.Input, d.terminal)) == 0 {
+		return guard.Prepare(ctx, r)
+	}
+	input, err := c.condense(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	r.Input = input
+	return guard.Prepare(ctx, r)
 }
 
 // Handled is a caller's answer to a tool call it intercepts.

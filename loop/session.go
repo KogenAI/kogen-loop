@@ -227,7 +227,7 @@ func build(cfg SessionConfig) (*Session, error) {
 		cfg: cfg, instructions: instructions, defs: defs, terminal: slices.Clone(terminal),
 		tools: &tools.Tools{Root: cfg.Root, Session: session, Enabled: slices.Clone(enabled), Protected: cfg.Protected, Excluded: cfg.Excluded},
 	}
-	s.direct = &Direct{Client: client, Session: session, Observer: attempts{s}, Cache: cache}
+	s.direct = &Direct{Client: client, Session: session, Observer: attempts{s}, Cache: cache, Condensed: s.condensed, terminal: slices.Clone(terminal)}
 	return s, nil
 }
 
@@ -247,6 +247,15 @@ type attempts struct{ s *Session }
 // Attempt forwards one provider attempt record as a request.attempt event.
 func (a attempts) Attempt(record map[string]any) {
 	a.s.emit(api.EventRequestAttempt, map[string]any{"n": a.s.requests, "record": record})
+}
+
+// condensed discloses one history condensation as a context.condensed event.
+func (s *Session) condensed(c Condensation) {
+	s.emit(api.EventContextCondensed, map[string]any{
+		"n": s.requests, "requests": c.Requests, "condensed_exchanges": c.CondensedExchanges,
+		"kept_exchanges": c.KeptExchanges, "bytes_before": c.BytesBefore, "bytes_after": c.BytesAfter,
+		"limit": c.Limit, "summary_bytes": c.SummaryBytes, "usage": c.Usage,
+	})
 }
 
 func (s *Session) emit(typ string, fields map[string]any) {

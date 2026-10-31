@@ -156,7 +156,7 @@ func TestToolOverlapCompatibility(t *testing.T) {
 			want []string
 		}{
 			{Request{}, []string{"Owner", "Role", "Instructions", "Input", "Tools"}},
-			{Direct{}, []string{"Client", "Session", "Observer", "CacheID", "Cache"}},
+			{Direct{}, []string{"Client", "Session", "Observer", "CacheID", "Cache", "Condensed", "terminal"}},
 			{Round{}, []string{"Owner", "Role", "Instructions", "Definitions", "Tools", "Terminal"}},
 			{Hooks{}, []string{"BeforeRequest", "AfterResponse", "BeforeCall", "HandleCall", "AfterCall"}},
 			{Handled{}, []string{"Handled", "Output", "Terminal"}},

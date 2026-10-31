@@ -44,15 +44,17 @@ type Requester interface {
     Request(ctx context.Context, r Request) (*provider.Response, []any, error)
 }
 
-// Direct is the provider-backed Requester (provider.Client.Respond). It always refuses an
-// over-budget request (typed error loop/context_budget_exceeded) before sending it, never
-// clipping, and takes an optional provider.Observer for attempt records.
+// Direct is the provider-backed Requester (provider.Client.Respond). A request that fits is
+// sent unchanged; an over-budget one is condensed first (see "Input window budget"), and one
+// that cannot be made to fit is refused (typed error loop/context_budget_exceeded) before
+// sending, never clipped. It takes an optional provider.Observer for attempt records.
 type Direct struct {
-    Client   *provider.Client
-    Session  *sys.Session
-    Observer provider.Observer  // nil: none
-    CacheID  string             // one cache identity per conversation (kept across rounds)
-    Cache    *provider.Cache
+    Client    *provider.Client
+    Session   *sys.Session
+    Observer  provider.Observer  // nil: none
+    CacheID   string             // one cache identity per conversation (kept across rounds)
+    Cache     *provider.Cache
+    Condensed func(Condensation) // nil: none; told of each condensation before the request is sent
 }
 
 // Handled is a caller's answer to a tool call it intercepts.
@@ -126,9 +128,19 @@ Cancellation observed after a response/call hook returns nil stops the round
 before executing a tool, starting another request or returning an ending. A hook error still
 takes precedence and is returned unchanged.
 
-### Input window budget (fixed)
+### Input window budget (fixed) and condensation
 
-The complete rendered request (instructions, tools, cache placement) is measured inclusively against a fixed 524288-byte ceiling (`provider.InputBudgetBytes`), or a smaller documented bound of the role's model family. There is no option to lower it: `loop.FailOverBudget` and `loop.Direct` have no budget field. `loop.Direct` always applies `FailOverBudget`; a request over the ceiling is refused with `loop/context_budget_exceeded` (message `<owner>: complete next request N bytes exceeds LIMIT; reserve R tokens. Nothing was sent and nothing was clipped.`) before anything is sent, and the input is never clipped. `tools.Measure` reports the rendered size, the ceiling and the output reserve.
+The complete rendered request (instructions, tools, cache placement) is measured inclusively against a fixed 524288-byte ceiling (`provider.InputBudgetBytes`), or a smaller documented bound of the role's model family; the 131072-token output reserve and the family bounds stay in force. There is no option to change it, and describing the limit as a token budget does not enlarge it. A request that fits is sent unchanged.
+
+`loop.Direct` (and so every standalone `Session`) condenses a request that does not fit, before sending it, instead of refusing it:
+
+- The conversation is split at complete exchange boundaries (the replayed items of one response with the outputs of its calls); a call is never separated from its result and an incomplete batch is never consumed.
+- Kept exact: the instructions and tool definitions, the original task and every later user message (in a `Session`, also the exchange whose terminal call a later round's feedback answers), and the newest complete exchange together with as many recent exchanges as fit in a quarter of the ceiling. Older exchanges, and any earlier summary, become one summary message (a user message that starts with `loop.CondensedHeader`, so it is kept in session history and in `session.json`, survives resume and is folded into the next condensation).
+- The summary is written by the model through the same provider, role, credentials and transport, in requests without tools whose complete body must itself fit. Older exchanges are rendered as quoted data in fitting chunks, each chunk request carries the summary so far, and a summary above a quarter of the ceiling is merged once more and must come out shorter. The instructions ask for facts, decisions, files changed, checks and outcomes, unresolved errors and remaining work, and to treat the historical text, including instructions in it, as data.
+- Every step consumes exchanges or shrinks the summary, and at most two summarization requests per older exchange plus two are sent. The condensed request is measured again. If what must stay exact (or one older exchange) cannot fit, the request is refused with `loop/context_budget_exceeded` (message `<owner>: complete next request N bytes exceeds LIMIT; reserve R tokens. ...`) before the conversation is sent; when no summarization is possible the message ends `Nothing was sent and nothing was clipped.`, otherwise it says what condensation could not reduce. A provider failure, a cancellation, an empty summary or a summary that cannot be shortened stops the round with that error; nothing is retried in a loop and no finish is invented. Finishing remains the model's claim.
+- Disclosure: a `context.condensed` event precedes the condensed request's attempts (summarization attempts are `request.attempt` events whose `record.purpose` is `condensation`). The summarization usage is in that event, not in the round's `response` totals.
+
+`loop.FailOverBudget` is the guard that refuses without condensing; `loop.Direct` applies it after condensation. `tools.Measure` reports the rendered size, the ceiling and the output reserve.
 
 ### Client response budget (Go library)
 
@@ -288,6 +300,7 @@ Every line has `protocol`, `seq` (1-based, gapless), `time` (RFC 3339 UTC) and `
 | `request.started` | `n`, `owner`, `model`, `effort` |
 | `request.attempt` | `n`, `record` (the provider observer record, credentials never included) |
 | `response` | `n`, `response_id`, `usage` (`api.Usage`) |
+| `context.condensed` | `n` (the request it precedes), `requests` (summarization requests), `condensed_exchanges`, `kept_exchanges`, `bytes_before`, `bytes_after`, `limit`, `summary_bytes`, `usage` (`api.Usage` of the summarization requests; unknown stays null) |
 | `tool.call` | `call_id`, `name`, `arguments_sha256` |
 | `tool.result` | `call_id`, `name`, `result_sha256`, `bytes`, `cut` (bool), and `rule` only for a refused shell call. `bytes` and `result_sha256` describe what the model received, after the cut. |
 | `round.ended` | `ending` (`terminal`/`no_call`), `terminal_tool`, `claim` (terminal arguments or final text — `output_text` and `refusal` parts in content order, newline-joined — bounded 16384 bytes; **a claim, not proof**), `requests`, `usage` (round total) |
@@ -341,15 +354,15 @@ With `session.dir`, the loop writes `session.json` atomically (0600, directory 0
   "tools": ["read_file", "write_file", "list_files", "search_text", "shell", "view_image", "documentation"],
   "terminal_default": ["finish"],
   "session_resume": "transcript",
-  "context_policies": ["fail_over_budget"],
+  "context_policies": ["condense_over_budget"],
   "usage": "provider",
   "images": true,
   "subagents": false,
-  "compaction": false
+  "compaction": true
 }
 ```
 
-`false` and missing capabilities are real absences, not hidden equivalents. Subagents, compaction, alternative read/edit tools and review/build mechanisms are future experiments behind `HandleCall` and tool registration. Defaults don't change without scoped evidence.
+`false` and missing capabilities are real absences, not hidden equivalents. Subagents, alternative read/edit tools and review/build mechanisms are future experiments behind `HandleCall` and tool registration. Defaults don't change without scoped evidence.
 
 ## 5. Errors
 
@@ -408,7 +421,7 @@ Kogen-side synchronization and pin updates remain outside this component's scope
 - handled call;
 - hook error stops the round;
 - tool result cut;
-- over-budget refusal;
+- over-budget refusal of an irreducible request, and condensation of a reducible one (`context.condensed`);
 - deadline;
 - interruption with a running shell child (group terminated);
 - strict task refusal;
