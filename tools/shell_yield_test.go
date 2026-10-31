@@ -85,3 +85,31 @@ func TestShellYieldLargeJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestShellYieldLargeMalformedOutput(t *testing.T) {
+	root := t.TempDir()
+	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
+	defer tl.EndShellRound()
+	command := `printf '\377'; head -c 20000 /dev/zero | tr '\000' x; printf '\376'; while [ ! -f release ]; do sleep .05; done`
+	check := func(s string, status string) {
+		t.Helper()
+		var v map[string]any
+		if len(s) > maxResult || json.Unmarshal([]byte(s), &v) != nil || v["status"] != status {
+			t.Fatalf("bad envelope: %q", s)
+		}
+		output, ok := v["output"].(string)
+		if !ok || !strings.HasPrefix(output, "�xxx") || !strings.HasSuffix(output, "xxx�") || !strings.Contains(output, "bytes omitted") {
+			t.Fatalf("lost retained output: %q", output)
+		}
+	}
+	s := run(t, tl, ShellTool, map[string]any{"command": command})
+	check(s, "running")
+	var v map[string]any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	check(run(t, tl, ShellTool, map[string]any{"handle": v["handle"]}), "completed")
+}

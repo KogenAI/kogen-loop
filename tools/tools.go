@@ -666,7 +666,11 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 		}
 		return "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output, "", nil
 	}
-	envelope := map[string]any{"status": "running", "handle": id, "output": res.Output}
+	output := res.Output
+	if !utf8.ValidString(output) {
+		output = string([]rune(output))
+	}
+	envelope := map[string]any{"status": "running", "handle": id, "output": output}
 	if completed {
 		envelope["status"] = "completed"
 		envelope["exit_status"] = res.Status
@@ -674,7 +678,6 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 	raw, _ := json.Marshal(envelope)
 	if len(raw) > maxResult {
 		// JSON escaping expands some bytes. Cut output, never the envelope.
-		output := res.Output
 		lo, hi := 100, min(len(output), maxResult)
 		for lo < hi {
 			mid := (lo + hi + 1) / 2
@@ -706,13 +709,18 @@ func (t *Tools) probe(args map[string]any) (string, error) {
 // ---- cut ----
 
 // Cut bounds model-facing text to 16384 UTF-8 bytes including the omission marker (LOOP-8).
-// Fitting text is unchanged. Longer text keeps its first 4096 bytes and a suffix, each
+// Invalid UTF-8 bytes are replaced before bounding. Valid fitting text is unchanged. Longer text keeps its first 4096 bytes and a suffix, each
 // backing off an incomplete UTF-8 character, around a marker that counts the bytes actually
 // absent; reserving the marker's width for the whole text's digit count is conservative and
 // may leave a few unused bytes. Cutting a cut text changes nothing. Typed image results
 // (Output.Cut) pass unchanged and the private originals a result was read from are never
 // transformed: the bound applies once, where a result is delivered.
-func Cut(text string) string { return cutText(text, maxResult, defaultResultHead) }
+func Cut(text string) string {
+	if !utf8.ValidString(text) {
+		text = string([]rune(text))
+	}
+	return cutText(text, maxResult, defaultResultHead)
+}
 
 func cutText(text string, bound, headSize int) string {
 	if len(text) <= bound {
