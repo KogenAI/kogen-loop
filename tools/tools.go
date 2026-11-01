@@ -571,7 +571,7 @@ func (t *Tools) EndShellRound() {
 		j.cancel()
 	}
 	for _, j := range jobs {
-		<-j.cmd.Done()
+		j.cmd.Stop(j.cancel)
 	}
 }
 
@@ -583,8 +583,7 @@ func (t *Tools) CancelShellHandle(id string) {
 	delete(r.jobs, id)
 	r.mu.Unlock()
 	if j != nil {
-		j.cancel()
-		<-j.cmd.Done()
+		j.cmd.Stop(j.cancel)
 	}
 }
 func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string, error) {
