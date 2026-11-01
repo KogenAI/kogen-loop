@@ -95,6 +95,7 @@ func outText(wire, kind, unit string, n int) []string {
 }
 
 func TestOutputLimitThinkingIsNotVisible(t *testing.T) {
+	t.Parallel()
 	const w = "anthropic"
 	start := func(i int64, b map[string]any) string {
 		return sse(ev("content_block_start", "index", i, "content_block", b))
@@ -124,6 +125,7 @@ func outRespond(t *testing.T, wire string, attempts ...obsAttempt) (*Response, e
 }
 
 func TestOutputLimitCount(t *testing.T) {
+	t.Parallel()
 	all := []string{"chatgpt", "supergrok", "anthropic"}
 	responses := []string{"chatgpt", "supergrok"}
 	// a mixed case: the first kind's bytes, then the second's
@@ -180,6 +182,7 @@ func TestOutputLimitCount(t *testing.T) {
 	for _, c := range cases {
 		for _, wire := range c.wires {
 			t.Run(c.name+"/"+wire, func(t *testing.T) {
+				t.Parallel()
 				frames := c.frames(wire)
 				second := outStd(wire, outText(wire, "text", "a", outLimit)...)
 				first := outStd(wire, frames...)
@@ -282,9 +285,11 @@ func outServer(t *testing.T, wire string, h ...handler) (*env, Request) {
 }
 
 func TestOutputLimitRunaway(t *testing.T) {
+	t.Parallel()
 	labels := map[string]string{"chatgpt": "ChatGPT", "supergrok": "SuperGrok", "anthropic": "Anthropic"}
 	for _, wire := range []string{"chatgpt", "supergrok", "anthropic"} {
 		t.Run(wire+"/the retry answers", func(t *testing.T) {
+			t.Parallel()
 			var f outFake
 			e, req := outServer(t, wire, f.runaway(wire), f.answer(wire))
 			obs := &observer{}
@@ -310,6 +315,7 @@ func TestOutputLimitRunaway(t *testing.T) {
 			}
 		})
 		t.Run(wire+"/three runaways", func(t *testing.T) {
+			t.Parallel()
 			var f outFake
 			e, req := outServer(t, wire, f.runaway(wire), f.runaway(wire), f.runaway(wire))
 			obs := &observer{}
@@ -331,6 +337,7 @@ func TestOutputLimitRunaway(t *testing.T) {
 		})
 	}
 	t.Run("chatgpt single attempt", func(t *testing.T) {
+		t.Parallel()
 		var f outFake
 		e, req := outServer(t, "chatgpt", f.runaway("chatgpt"), f.answer("chatgpt"))
 		req.Single = true
