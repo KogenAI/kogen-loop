@@ -123,3 +123,53 @@ func TestShellLifecycleHandleRetrieval(t *testing.T) {
 		t.Fatalf("retrieval: %q (%v)", text, err)
 	}
 }
+
+func TestShellLifecycleUnusableHandles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		present bool
+		value   any
+	}{
+		{"absent", false, nil}, {"null", true, nil}, {"empty", true, ""}, {"whitespace", true, "   "},
+		{"number", true, 42}, {"boolean", true, false}, {"array", true, []any{}}, {"object", true, map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"command": "printf 'args-ok\\n'; exit 7"}
+			if tc.present {
+				args["handle"] = tc.value
+			}
+			if got := runShellArgs(t, args); got != "exit status: 7\nargs-ok\n" {
+				t.Fatalf("output: %q", got)
+			}
+		})
+	}
+}
+
+func TestShellLifecycleNeitherUsable(t *testing.T) {
+	commands := []struct {
+		name    string
+		present bool
+		value   any
+	}{{"absent", false, nil}, {"empty", true, ""}, {"whitespace", true, "   "}}
+	handles := []struct {
+		name    string
+		present bool
+		value   any
+	}{{"absent", false, nil}, {"null", true, nil}, {"empty", true, ""}, {"whitespace", true, "   "}, {"number", true, 42}}
+	for _, command := range commands {
+		for _, handle := range handles {
+			t.Run(command.name+"/"+handle.name, func(t *testing.T) {
+				args := map[string]any{}
+				if command.present {
+					args["command"] = command.value
+				}
+				if handle.present {
+					args["handle"] = handle.value
+				}
+				if got := runShellArgs(t, args); !strings.HasPrefix(got, "error:") {
+					t.Fatalf("output: %q", got)
+				}
+			})
+		}
+	}
+}
