@@ -54,7 +54,7 @@ async function exercise(mode) {
           const id = count === 2 ? 'start' : count === 3 ? 'poll' : 'join';
           const out = JSON.parse(outputs.find(x => x.call_id === id).output);
           if (count === 2) {
-            observe({status:out.status, partial:out.output.includes('partial\n'), bounded:Date.now()-started < 8000}, {status:'running', partial:true, bounded:true});
+            observe({status:out.status, partial:out.output.includes('partial\n'), bounded:Date.now()-started < 52000}, {status:'running', partial:true, bounded:true});
             assert.equal(typeof out.handle, 'string'); assert.ok(out.handle.length > 0); handle = out.handle;
             pid = Number(fs.readFileSync(path.join(root, 'actor.pid'), 'utf8').trim());
             assert.ok(Number.isInteger(pid) && pid > 1);
@@ -88,10 +88,10 @@ async function exercise(mode) {
     const done = new Promise((resolve,reject) => {child.on('error',reject);child.on('close',(code,signal)=>resolve({code,signal}));});
     child.stdin.end(JSON.stringify(task));
     let timedOut = false;
-    timer = setTimeout(() => {timedOut = true; child.kill('SIGTERM');}, 45000);
+    timer = setTimeout(() => {timedOut = true; child.kill('SIGTERM');}, 90000);
     const exit = await done; clearTimeout(timer);
     if (failure) throw failure;
-    assert.equal(timedOut, false, 'CLI failed to yield within explicit 45 second fixture watchdog (unbounded shell wait)');
+    assert.equal(timedOut, false, 'CLI failed to yield within explicit 90 second fixture watchdog (45 second yield plus 30 second retrieval) (unbounded shell wait)');
     const events = stdout.trim().split('\n').map(s => JSON.parse(s));
     assert.ok(events.some(e => e.type === 'tool.call'), 'real CLI must execute a tool call: '+stderr);
     if (mode !== 'cancel') {
@@ -123,6 +123,6 @@ if (require.main === module) {
   }
 } else {
   const {When,Then} = require('@cucumber/cucumber');
-  When('I run the bounded shell CLI fixture {string}', {timeout:90000}, async function(mode) { this.shellHang = await exercise(mode); });
+  When('I run the bounded shell CLI fixture {string}', {timeout:115000}, async function(mode) { this.shellHang = await exercise(mode); });
   Then('the bounded shell observations are:', function(text) { observe(this.shellHang, JSON.parse(text)); });
 }

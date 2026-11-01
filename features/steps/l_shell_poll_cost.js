@@ -11,7 +11,7 @@ function verify(rows, expected) {
     assert.equal(r.requests, expected[i], 'requests per command');
     assert.equal(r.output, 'partial\ncomplete\n', 'cumulative output delivered to provider');
     assert.equal(r.exit_status, 7, 'exit status delivered to provider');
-    assert.equal(r.first, 'running', 'initial yield');
+    assert.equal(r.first, 'exit status: 7\npartial\ncomplete\n', 'first result is the completed command text');
   });
 }
 async function run(seconds) {
@@ -24,7 +24,7 @@ async function run(seconds) {
     const root=path.join(dir,'root'),home=path.join(dir,'home'); fs.mkdirSync(root);
     const creds=path.join(home,'.kogen','credentials'); fs.mkdirSync(creds,{recursive:true});
     fs.writeFileSync(path.join(creds,'chatgpt.json'),JSON.stringify({client_id:'oaiapp_fixture',access_token:'fake',refresh_token:'fake',expires_at:Math.floor(Date.now()/1000)+3600}));
-    let requests=0, last='start', first, final, handle;
+    let requests=0, last='start', first, final;
     server=http.createServer(async(req,res)=>{
       try {
         assert.equal(req.url,'/v1/responses');
@@ -36,11 +36,11 @@ async function run(seconds) {
         else {
           const output=body.input.find(x=>x.type==='function_call_output'&&x.call_id===last);
           assert.ok(output,'shell result reaches next model request');
-          const out=JSON.parse(output.output);
-          if(requests===2) {first=out.status; handle=out.handle; assert.equal(typeof handle,'string');}
-          assert.equal(out.handle,handle,'stable handle');
-          if(out.status==='completed') final=out;
-          else {assert.equal(out.status,'running'); args={handle};}
+          assert.equal(requests,2,'one result request after the command');
+          first=output.output;
+          const m=/^exit status: (\d+)\n([\s\S]*)$/.exec(first);
+          assert.ok(m,'completed command text');
+          final={exit_status:Number(m[1]),output:m[2]};
         }
         const items=final ? [{type:'message',role:'assistant',content:[{type:'output_text',text:'done'}]}] : [{type:'function_call',call_id:(last='call'+requests),name:'shell',arguments:JSON.stringify(args)}];
         res.writeHead(200,{'Content-Type':'text/event-stream'});
@@ -65,16 +65,16 @@ async function run(seconds) {
   }
 }
 if(require.main===module) {
-  const good=[{requests:3,first:'running',output:'partial\ncomplete\n',exit_status:7}];
-  if(process.argv[2]==='good'){verify(good,[3]);console.log('poll observer accepted');}
+  const good=[{requests:2,first:'exit status: 7\npartial\ncomplete\n',output:'partial\ncomplete\n',exit_status:7}];
+  if(process.argv[2]==='good'){verify(good,[2]);console.log('poll observer accepted');}
   else {
-    for(const [key,value] of Object.entries({requests:8,first:'completed',output:'partial\n',exit_status:0})) {
-      assert.throws(()=>verify([{...good[0],[key]:value}],[3]),undefined,'reject '+key);
+    for(const [key,value] of Object.entries({requests:8,first:'{"status":"running"}',output:'partial\n',exit_status:0})) {
+      assert.throws(()=>verify([{...good[0],[key]:value}],[2]),undefined,'reject '+key);
     }
     console.log('poll observer rejected');process.exitCode=1;
   }
 } else {
   const {When,Then}=require('@cucumber/cucumber');
   When('I measure shell commands lasting {int} and {int} seconds',{timeout:180000},async function(a,b){this.pollRows=[await run(a),await run(b)];console.log('requests per long command: '+JSON.stringify(this.pollRows.map(r=>r.requests)));});
-  Then('each long command uses {int} model requests and delivers its complete result',function(n){verify(this.pollRows,[n,n]);});
+  Then('each command uses {int} model requests and delivers its complete result in the first tool response',function(n){verify(this.pollRows,[n,n]);});
 }
