@@ -63,7 +63,7 @@ async function exercise(mode) {
             else if (mode === 'cancel') { child.kill('SIGTERM'); res.end(); return; }
             else { started = Date.now(); items = [call('poll', {handle})]; }
           } else if (count === 3) {
-            observe({status:out.status, same:out.handle === handle, alive:live(pid), bounded:Date.now()-started < 8000}, {status:'running', same:true, alive:true, bounded:true});
+            observe({status:out.status, same:out.handle === handle, alive:live(pid), bounded:Date.now()-started < 37000}, {status:'running', same:true, alive:true, bounded:true});
             seen.pollBounded = true;
             fs.writeFileSync(path.join(root, 'release'), 'go');
             // Observe actual command completion before asking for the completed snapshot.
@@ -88,10 +88,10 @@ async function exercise(mode) {
     const done = new Promise((resolve,reject) => {child.on('error',reject);child.on('close',(code,signal)=>resolve({code,signal}));});
     child.stdin.end(JSON.stringify(task));
     let timedOut = false;
-    timer = setTimeout(() => {timedOut = true; child.kill('SIGTERM');}, 12000);
+    timer = setTimeout(() => {timedOut = true; child.kill('SIGTERM');}, 45000);
     const exit = await done; clearTimeout(timer);
     if (failure) throw failure;
-    assert.equal(timedOut, false, 'CLI failed to yield within explicit 12 second fixture watchdog (unbounded shell wait)');
+    assert.equal(timedOut, false, 'CLI failed to yield within explicit 45 second fixture watchdog (unbounded shell wait)');
     const events = stdout.trim().split('\n').map(s => JSON.parse(s));
     assert.ok(events.some(e => e.type === 'tool.call'), 'real CLI must execute a tool call: '+stderr);
     if (mode !== 'cancel') {

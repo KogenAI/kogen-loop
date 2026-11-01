@@ -353,7 +353,7 @@ func TestShellLifecycleCompatibility(t *testing.T) {
 		}
 	}
 	def, ok := tools.Definition(tools.ShellTool)
-	if !ok || !strings.Contains(fmt.Sprint(def["description"]), "Each call waits up to one second") {
+	if !ok || !strings.Contains(fmt.Sprint(def["description"]), "retrieval waits up to 30 seconds") {
 		t.Errorf("shell definition %v", def)
 	}
 	props := def["parameters"].(map[string]any)["properties"].(map[string]any)

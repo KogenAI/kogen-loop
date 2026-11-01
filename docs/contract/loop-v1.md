@@ -204,8 +204,8 @@ stop what `claude` runs between hooks, or processes that leave the group.
 
 ### Shell time limit
 
-A shell call supplies exactly one string `command` or `handle`. Each call waits at most
-one second without imposing an execution timeout. Fast commands return `exit status: <n>\n<combined output>`.
+A shell call supplies exactly one string `command` or `handle`. A new command waits at most one second; retrieval waits at most 30 seconds. Both return
+immediately on completion without imposing an execution timeout. Fast commands return `exit status: <n>\n<combined output>`.
 Running commands return JSON with `status: "running"`, an opaque `handle` and cumulative
 `output`. Retrieval returns that shape or `status: "completed"` with the same handle,
 integer `exit_status` and cumulative output. Completed retrieval is repeatable until round
