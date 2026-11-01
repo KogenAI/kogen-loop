@@ -11,6 +11,7 @@ import (
 )
 
 func TestShellYieldRetrievalScope(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
 	defer tl.EndShellRound()
@@ -57,8 +58,10 @@ func TestShellYieldRetrievalScope(t *testing.T) {
 }
 
 func TestShellYieldLargeJSON(t *testing.T) {
+	t.Parallel()
 	for _, n := range []string{"16383", "16384", "16385", "200000"} {
 		t.Run(n, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
 			defer tl.EndShellRound()
@@ -87,6 +90,7 @@ func TestShellYieldLargeJSON(t *testing.T) {
 }
 
 func TestShellYieldLargeMalformedOutput(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
 	defer tl.EndShellRound()
