@@ -590,6 +590,9 @@ func (t *Tools) CancelShellHandle(id string) {
 func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string, error) {
 	command, hasCommand := args["command"]
 	handle, hasHandle := args["handle"]
+	if h, ok := handle.(string); hasCommand && ok && h == "" {
+		hasHandle = false
+	}
 	if hasCommand == hasHandle {
 		return "error: supply exactly one of command or handle", "", nil
 	}
