@@ -10,18 +10,41 @@ import (
 	"strings"
 
 	"testing"
+	"time"
 
 	"kogen-loop/sys"
 	"kogen-loop/tools"
 )
 
+// yieldAfter is a Tools.ShellAfter that lets a new command's wait elapse once the command has
+// written the marker file in root, and never lets a retrieval's wait elapse.
+func yieldAfter(t *testing.T, root, marker string) func(time.Duration) <-chan time.Time {
+	return func(wait time.Duration) <-chan time.Time {
+		if wait != 45*time.Second {
+			return nil
+		}
+		fire := make(chan time.Time, 1)
+		go func() {
+			end := time.Now().Add(10 * time.Second)
+			for time.Now().Before(end) {
+				if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			fire <- time.Now()
+		}()
+		return fire
+	}
+}
+
 func TestDiscardedAttemptStopsYieldedShell(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool}}
+	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool}, ShellAfter: yieldAfter(t, root, "ready")}
 	defer tl.EndShellRound()
 	st := newStage(context.Background(), tl, nil)
-	st.Done(0, olShell("c", "while :; do sleep 1; done"))
+	st.Done(0, olShell("c", ": > ready; while :; do sleep 1; done"))
 	st.mu.Lock()
 	g := st.gen
 	for len(g.slots) == 0 || g.slots[0].state != finished {
@@ -47,10 +70,10 @@ func TestDiscardedAttemptStopsYieldedShell(t *testing.T) {
 func TestDiscardedAttemptStopsCompletedYieldedShell(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool}}
+	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool}, ShellAfter: yieldAfter(t, root, "ready")}
 	defer tl.EndShellRound()
 	st := newStage(context.Background(), tl, nil)
-	st.Done(0, olShell("c", `sleep 600 >/dev/null 2>&1 & echo $! > child.pid; while [ ! -f release ]; do sleep .05; done`))
+	st.Done(0, olShell("c", `sleep 600 >/dev/null 2>&1 & echo $! > child.pid; : > ready; while [ ! -f release ]; do sleep .05; done`))
 	st.mu.Lock()
 	g := st.gen
 	for len(g.slots) == 0 || g.slots[0].state != finished {

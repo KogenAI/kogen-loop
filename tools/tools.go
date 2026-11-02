@@ -76,7 +76,12 @@ type Tools struct {
 	Probe func(command string, files any) (string, error)
 	// Documentation is the shaper's documentation tool (user-agent, timeout).
 	Documentation Documentation
-	shells        *shellRegistry
+	// ShellAfter is a test seam. Production leaves it nil and the shell wait uses a real
+	// timer. When set, a shell call that reaches its wait passes ShellAfter the wait it
+	// would otherwise take, starts no timer and treats a value received from the returned
+	// channel as that wait elapsing. It cannot change the wait itself.
+	ShellAfter func(wait time.Duration) <-chan time.Time
+	shells     *shellRegistry
 }
 
 const (
@@ -628,15 +633,21 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 	if hasHandle {
 		wait = 30 * time.Second
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	var elapsed <-chan time.Time
+	if t.ShellAfter != nil {
+		elapsed = t.ShellAfter(wait)
+	} else {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		elapsed = timer.C
+	}
 	var done <-chan struct{}
 	if ctx != nil {
 		done = ctx.Done()
 	}
 	select {
 	case <-j.cmd.Done():
-	case <-timer.C:
+	case <-elapsed:
 	case <-done:
 		j.cancel()
 		<-j.cmd.Done()

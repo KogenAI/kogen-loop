@@ -17,7 +17,8 @@ import (
 func TestShellYieldRetrievalScope(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
+	clock := newShellClock()
+	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: clock.After}
 	defer tl.EndShellRound()
 	decode := func(s string) map[string]any {
 		t.Helper()
@@ -27,10 +28,15 @@ func TestShellYieldRetrievalScope(t *testing.T) {
 		}
 		return v
 	}
-	start := time.Now()
-	v := decode(run(t, tl, ShellTool, map[string]any{"command": "printf one; while [ ! -f release ]; do sleep .05; done; printf two; exit 7"}))
-	if v["status"] != "running" || v["output"] != "one" || time.Since(start) < 44*time.Second || time.Since(start) > 52*time.Second {
-		t.Fatalf("yield: %v after %v", v, time.Since(start))
+	ch := callShell(tl, map[string]any{"command": "printf one; : > ready; while [ ! -f release ]; do sleep .05; done; printf two; exit 7"})
+	yield := clock.next(t, "yield", 45*time.Second)
+	appears(t, root, "ready")
+	captured(t, tl, len("one"))
+	held(t, "yield", ch)
+	yield.fire <- time.Now()
+	v := decode(finished(t, "yield", ch))
+	if v["status"] != "running" || v["output"] != "one" {
+		t.Fatalf("yield: %v", v)
 	}
 	id, ok := v["handle"].(string)
 	if !ok || id == "" {
@@ -39,28 +45,41 @@ func TestShellYieldRetrievalScope(t *testing.T) {
 	if got := run(t, tl, ShellTool, map[string]any{"handle": " " + id + " "}); got != "error: unknown shell handle" {
 		t.Fatalf("padded handle: %q", got)
 	}
-	start = time.Now()
-	v = decode(run(t, tl, ShellTool, map[string]any{"handle": id}))
-	if v["status"] != "running" || v["output"] != "one" || time.Since(start) < 29*time.Second || time.Since(start) > 36*time.Second {
+	select {
+	case r := <-clock.requests:
+		t.Fatalf("unknown handle asked ShellAfter for %v", r.wait)
+	default:
+	}
+	ch = callShell(tl, map[string]any{"handle": id})
+	retrieval := clock.next(t, "running retrieval", 30*time.Second)
+	held(t, "running retrieval", ch)
+	retrieval.fire <- time.Now()
+	v = decode(finished(t, "running retrieval", ch))
+	if v["status"] != "running" || v["output"] != "one" {
 		t.Fatal(v)
 	}
-	release := make(chan error, 1)
-	go func() {
-		time.Sleep(2 * time.Second)
-		release <- os.WriteFile(filepath.Join(root, "release"), nil, 0600)
-	}()
-	start = time.Now()
+	ch = callShell(tl, map[string]any{"handle": id})
+	woken := clock.next(t, "completion retrieval", 30*time.Second)
+	held(t, "completion retrieval", ch)
+	if err := os.WriteFile(filepath.Join(root, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := finished(t, "completion retrieval", ch)
+	select {
+	case <-woken.fire:
+		t.Fatal("the completion retrieval waited for its controlled wait")
+	default:
+	}
 	for i := 0; i < 2; i++ {
-		v = decode(run(t, tl, ShellTool, map[string]any{"handle": id}))
-		if i == 0 && (time.Since(start) < time.Second || time.Since(start) > 6*time.Second) {
-			t.Fatalf("completion did not wake retrieval promptly: %v", time.Since(start))
+		if i > 0 {
+			ch = callShell(tl, map[string]any{"handle": id})
+			clock.next(t, "repeat retrieval", 30*time.Second)
+			got = finished(t, "repeat retrieval", ch)
 		}
+		v = decode(got)
 		if v["status"] != "completed" || v["exit_status"] != float64(7) || v["output"] != "onetwo" {
 			t.Fatal(v)
 		}
-	}
-	if err := <-release; err != nil {
-		t.Fatal(err)
 	}
 	tl.EndShellRound()
 	for _, a := range []map[string]any{{}, {"handle": id}, {"handle": "unknown"}, {"command": "touch bad", "handle": id}, {"handle": 42}} {
@@ -108,9 +127,10 @@ func TestShellYieldLargeJSON(t *testing.T) {
 func TestShellYieldLargeMalformedOutput(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
+	clock := newShellClock()
+	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: clock.After}
 	defer tl.EndShellRound()
-	command := `printf '\377'; head -c 20000 /dev/zero | tr '\000' x; printf '\376'; while [ ! -f release ]; do sleep .05; done`
+	command := `printf '\377'; head -c 20000 /dev/zero | tr '\000' x; printf '\376'; : > ready; while [ ! -f release ]; do sleep .05; done`
 	check := func(s string, status string) {
 		t.Helper()
 		var v map[string]any
@@ -122,7 +142,12 @@ func TestShellYieldLargeMalformedOutput(t *testing.T) {
 			t.Fatalf("lost retained output: %q", output)
 		}
 	}
-	s := run(t, tl, ShellTool, map[string]any{"command": command})
+	ch := callShell(tl, map[string]any{"command": command})
+	yield := clock.next(t, "yield", 45*time.Second)
+	appears(t, root, "ready")
+	captured(t, tl, 20002)
+	yield.fire <- time.Now()
+	s := finished(t, "yield", ch)
 	check(s, "running")
 	var v map[string]any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
@@ -131,7 +156,9 @@ func TestShellYieldLargeMalformedOutput(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "release"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	check(run(t, tl, ShellTool, map[string]any{"handle": v["handle"]}), "completed")
+	ch = callShell(tl, map[string]any{"handle": v["handle"]})
+	clock.next(t, "retrieval", 30*time.Second)
+	check(finished(t, "retrieval", ch), "completed")
 }
 
 func TestShellRetrievalCancellationStopsCommand(t *testing.T) {

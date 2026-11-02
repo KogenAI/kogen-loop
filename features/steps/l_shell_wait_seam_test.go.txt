@@ -1,0 +1,212 @@
+package tools_test
+
+// Independent acceptance harness for L-SHELL-WAIT-SEAM. The step file copies it into a
+// private copy of the tree as tools/zz_l_shell_wait_seam_accept_test.go; it is not part of
+// the repository's own test suite.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"kogen-loop/sys"
+	"kogen-loop/tools"
+)
+
+// deadlineContext is a deadline the test controls: closing done is the deadline passing.
+type deadlineContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c deadlineContext) Done() <-chan struct{} { return c.done }
+func (c deadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+type timerRequest struct {
+	wait time.Duration
+	fire chan time.Time
+}
+
+type outcome struct {
+	text string
+	err  error
+}
+
+func TestAcceptShellWaitSeam(t *testing.T) {
+	root := t.TempDir()
+	requests := make(chan timerRequest, 16)
+	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool},
+		ShellAfter: func(wait time.Duration) <-chan time.Time {
+			fire := make(chan time.Time, 1)
+			requests <- timerRequest{wait, fire}
+			return fire
+		}}
+	defer tl.EndShellRound()
+	start := func(ctx context.Context, args map[string]any) <-chan outcome {
+		ch := make(chan outcome, 1)
+		go func() {
+			out, err := tl.RunContext(ctx, tools.ShellTool, args)
+			ch <- outcome{out.Text, err}
+		}()
+		return ch
+	}
+	timer := func(step string, want time.Duration) timerRequest {
+		t.Helper()
+		select {
+		case r := <-requests:
+			if r.wait != want {
+				t.Fatalf("%s: the shell wait asked ShellAfter for %v, want %v", step, r.wait, want)
+			}
+			return r
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: the shell wait never asked ShellAfter for its %v wait", step, want)
+		}
+		return timerRequest{}
+	}
+	finish := func(step string, ch <-chan outcome) outcome {
+		t.Helper()
+		select {
+		case o := <-ch:
+			return o
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: the shell call did not return", step)
+		}
+		return outcome{}
+	}
+	held := func(step string, ch <-chan outcome) {
+		t.Helper()
+		select {
+		case o := <-ch:
+			t.Fatalf("%s: the call returned %q (%v) before its controlled wait elapsed", step, o.text, o.err)
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	appear := func(name string) {
+		t.Helper()
+		end := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("the command never wrote %s", name)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	type envelope struct {
+		Status     string `json:"status"`
+		Handle     string `json:"handle"`
+		Output     string `json:"output"`
+		ExitStatus *int   `json:"exit_status"`
+	}
+	decode := func(step string, o outcome) envelope {
+		t.Helper()
+		var v envelope
+		if o.err != nil || json.Unmarshal([]byte(o.text), &v) != nil {
+			t.Fatalf("%s: not a shell envelope: %q (%v)", step, o.text, o.err)
+		}
+		return v
+	}
+	none := func(step string) {
+		t.Helper()
+		select {
+		case r := <-requests:
+			t.Fatalf("%s: an extra ShellAfter(%v) call", step, r.wait)
+		default:
+		}
+	}
+
+	// A new command that completes within its wait returns its exit status; nothing fires.
+	ch := start(context.Background(), map[string]any{"command": "printf fast; exit 3"})
+	timer("fast command", 45*time.Second)
+	if o := finish("fast command", ch); o.err != nil || o.text != "exit status: 3\nfast" {
+		t.Fatalf("fast command: %q (%v)", o.text, o.err)
+	}
+	none("fast command")
+
+	// A new command that outlasts its wait yields when the controlled 45-second wait elapses.
+	ch = start(context.Background(), map[string]any{"command": "printf one; : > ready; while [ ! -f release ]; do sleep .05; done; printf two; exit 7"})
+	r := timer("yield", 45*time.Second)
+	appear("ready")
+	held("yield", ch)
+	r.fire <- time.Now()
+	v := decode("yield", finish("yield", ch))
+	if v.Status != "running" || v.Handle == "" || v.Output != "one" || v.ExitStatus != nil {
+		t.Fatalf("yield: %+v", v)
+	}
+	handle := v.Handle
+	none("yield")
+
+	// Retrieval asks for 30 seconds and holds the running command until that wait elapses.
+	ch = start(context.Background(), map[string]any{"handle": handle})
+	r = timer("retrieval", 30*time.Second)
+	held("retrieval", ch)
+	r.fire <- time.Now()
+	v = decode("retrieval", finish("retrieval", ch))
+	if v.Status != "running" || v.Handle != handle || v.Output != "one" || v.ExitStatus != nil {
+		t.Fatalf("retrieval: %+v", v)
+	}
+	none("retrieval")
+
+	// Completion ends a retrieval whose controlled wait has not elapsed.
+	ch = start(context.Background(), map[string]any{"handle": handle})
+	timer("completion", 30*time.Second)
+	if err := os.WriteFile(filepath.Join(root, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	v = decode("completion", finish("completion", ch))
+	if v.Status != "completed" || v.Handle != handle || v.Output != "onetwo" || v.ExitStatus == nil || *v.ExitStatus != 7 {
+		t.Fatalf("completion: %+v", v)
+	}
+	none("completion")
+
+	// Cancellation and a deadline end a new command's unexpired wait and stop the command.
+	for _, mode := range []string{"cancel", "deadline"} {
+		var ctx context.Context
+		var end func()
+		want := context.Canceled
+		if mode == "deadline" {
+			d := deadlineContext{Context: context.Background(), done: make(chan struct{})}
+			ctx, end, want = d, func() { close(d.done) }, context.DeadlineExceeded
+		} else {
+			c, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx, end = c, cancel
+		}
+		ch = start(ctx, map[string]any{"command": "echo $$ > " + mode + ".pid; : > " + mode + ".ready; while :; do sleep .05; done"})
+		timer(mode, 45*time.Second)
+		appear(mode + ".ready")
+		held(mode, ch)
+		end()
+		if o := finish(mode, ch); !errors.Is(o.err, want) {
+			t.Fatalf("%s: %q (%v), want %v", mode, o.text, o.err, want)
+		}
+		data, err := os.ReadFile(filepath.Join(root, mode+".pid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 1 {
+			t.Fatalf("%s pid: %q", mode, data)
+		}
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("%s: the command still exists: %v", mode, err)
+		}
+		none(mode)
+	}
+}

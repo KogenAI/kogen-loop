@@ -213,6 +213,7 @@ integer `exit_status` and cumulative output. Completed retrieval is repeatable u
 end. Invalid combinations and unknown or expired handles return `error:` text. Output is
 bounded inside the JSON envelope. Round cleanup stops yielded groups. The wait is not a
 setting; `deadline_seconds` remains the whole-round deadline and `sys.Options.Timeout` is independent.
+`Tools.ShellAfter` is a test seam: when set, a shell call passes it the wait it would otherwise take and treats a value from the returned channel as that wait elapsing; production leaves it nil.
 
 `func (t *Tools) Definition(name string) (map[string]any, bool)` returns the same
 definition as the package function `tools.Definition`, so callers may build
