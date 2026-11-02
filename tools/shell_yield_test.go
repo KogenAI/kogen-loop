@@ -97,8 +97,13 @@ func TestShellYieldLargeJSON(t *testing.T) {
 	for _, n := range []string{"16383", "16384", "16385", "200000"} {
 		t.Run(n, func(t *testing.T) {
 			t.Parallel()
+			size, err := strconv.Atoi(n)
+			if err != nil {
+				t.Fatal(err)
+			}
 			root := t.TempDir()
-			tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
+			clock := newShellClock()
+			tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: clock.After}
 			defer tl.EndShellRound()
 			parse := func(s string) map[string]any {
 				t.Helper()
@@ -108,7 +113,13 @@ func TestShellYieldLargeJSON(t *testing.T) {
 				}
 				return v
 			}
-			v := parse(run(t, tl, ShellTool, map[string]any{"command": "head -c " + n + " /dev/zero; while [ ! -f release ]; do sleep .05; done"}))
+			ch := callShell(tl, map[string]any{"command": "head -c " + n + " /dev/zero; : > ready; while [ ! -f release ]; do sleep .05; done"})
+			yield := clock.next(t, "yield", 45*time.Second)
+			appears(t, root, "ready")
+			captured(t, tl, size)
+			held(t, "yield", ch)
+			yield.fire <- time.Now()
+			v := parse(finished(t, "yield", ch))
 			if v["status"] != "running" {
 				t.Fatal(v)
 			}
@@ -116,9 +127,16 @@ func TestShellYieldLargeJSON(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "release"), nil, 0600); err != nil {
 				t.Fatal(err)
 			}
-			v = parse(run(t, tl, ShellTool, map[string]any{"handle": id}))
+			ch = callShell(tl, map[string]any{"handle": id})
+			retrieval := clock.next(t, "retrieval", 30*time.Second)
+			v = parse(finished(t, "retrieval", ch))
 			if v["status"] != "completed" {
 				t.Fatal(v)
+			}
+			select {
+			case <-retrieval.fire:
+				t.Fatal("the retrieval waited for its controlled wait")
+			default:
 			}
 		})
 	}
@@ -166,23 +184,32 @@ func TestShellRetrievalCancellationStopsCommand(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
-			tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}}
+			clock := newShellClock()
+			tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: clock.After}
 			defer tl.EndShellRound()
+			ch := callShell(tl, map[string]any{"command": "echo $$ > actor.pid; exec sleep 600"})
+			yield := clock.next(t, "yield", 45*time.Second)
+			appears(t, root, "actor.pid")
+			pid := 0
+			for end := time.Now().Add(10 * time.Second); pid == 0; time.Sleep(10 * time.Millisecond) {
+				data, err := os.ReadFile(filepath.Join(root, "actor.pid"))
+				if strings.HasSuffix(string(data), "\n") && err == nil {
+					pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+					if err != nil || pid <= 1 {
+						t.Fatalf("pid: %q", data)
+					}
+				} else if time.Now().After(end) {
+					t.Fatalf("pid: %q %v", data, err)
+				}
+			}
+			yield.fire <- time.Now()
+			text := finished(t, "yield", ch)
 			var v struct {
 				Status string `json:"status"`
 				Handle string `json:"handle"`
 			}
-			text := run(t, tl, ShellTool, map[string]any{"command": "echo $$ > actor.pid; exec sleep 600"})
 			if err := json.Unmarshal([]byte(text), &v); err != nil || v.Status != "running" || v.Handle == "" {
 				t.Fatalf("yield: %s %v", text, err)
-			}
-			data, err := os.ReadFile(filepath.Join(root, "actor.pid"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err != nil || pid <= 1 {
-				t.Fatalf("pid: %q", data)
 			}
 			var ctx context.Context
 			var cancel context.CancelFunc
@@ -197,10 +224,12 @@ func TestShellRetrievalCancellationStopsCommand(t *testing.T) {
 			}
 			defer cancel()
 			start := time.Now()
-			_, err = tl.RunContext(ctx, ShellTool, map[string]any{"handle": v.Handle})
+			_, err := tl.RunContext(ctx, ShellTool, map[string]any{"handle": v.Handle})
 			if !errors.Is(err, want) || time.Since(start) > 7*time.Second {
 				t.Fatalf("cancellation: %v after %v", err, time.Since(start))
 			}
+			// The retrieval's wait was queued before RunContext returned and never fired.
+			clock.next(t, "retrieval", 30*time.Second)
 			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 				t.Fatalf("command still exists: %v", err)
 			}
