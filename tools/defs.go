@@ -86,11 +86,11 @@ func Definition(name string) (map[string]any, bool) {
 			map[string]any{"path": str(), "content": str()}, "path", "content"), true
 	case ListFilesTool:
 		return fun(name,
-			"List the repository's files (tracked and untracked, not ignored), optionally under a folder inside the repository root; paths outside it, symlinks leaving it and ~ are refused.",
+			"List the repository's files (tracked and untracked, not ignored), optionally under a folder inside the repository root; paths outside it, symlinks leaving it and ~ are refused. Each path is printed as named, except that a name holding a control or other non-printable character or invalid UTF-8, or starting with \", is printed as a Go double-quoted string literal (for example \"a\\nb.txt\"): decode it to get the path.",
 			map[string]any{"path": str()}), true
 	case SearchTextTool:
 		return fun(name,
-			"Search the repository's files for a regular expression (git grep syntax), optionally under a path inside the repository root; paths outside it, symlinks leaving it and ~ are refused. Returns path:line:text matches.",
+			"Search the repository's files for a regular expression (git grep syntax), optionally under a path inside the repository root; paths outside it, symlinks leaving it and ~ are refused. Returns path:line:text matches. Each path is printed as named, except that a name holding a control or other non-printable character or invalid UTF-8, or starting with \", is printed as a Go double-quoted string literal (for example \"a\\nb.txt\"): decode it to get the path.",
 			map[string]any{"pattern": str(), "path": str()}, "pattern"), true
 	case DocumentationTool:
 		return fun(name,

@@ -557,12 +557,47 @@ func gitFailure(res GitResult) string {
 	return "error: " + strings.TrimSpace(res.Stdout+res.Stderr)
 }
 
+// renderPath is a path as the model sees it: verbatim when it is valid UTF-8, printable and
+// does not start with a double quote, otherwise strconv.Quote of it.
+func renderPath(p string) string {
+	if utf8.ValidString(p) && !strings.HasPrefix(p, `"`) && !strings.ContainsFunc(p, func(r rune) bool { return !strconv.IsPrint(r) }) {
+		return p
+	}
+	return strconv.Quote(p)
+}
+
+// renderMatches turns the records of git grep -z -n, <path> NUL <number> NUL <text> LF, into
+// <rendered path>:<number>:<text> lines. A record that does not have that shape ends the
+// parse and is kept as it came.
+func renderMatches(out string) string {
+	var b strings.Builder
+	for out != "" {
+		path, rest, ok := strings.Cut(out, "\x00")
+		if !ok {
+			b.WriteString(out)
+			break
+		}
+		num, rest, ok := strings.Cut(rest, "\x00")
+		if !ok {
+			b.WriteString(out)
+			break
+		}
+		text, rest, hasLF := strings.Cut(rest, "\n")
+		b.WriteString(renderPath(path) + ":" + num + ":" + text)
+		if hasLF {
+			b.WriteByte('\n')
+		}
+		out = rest
+	}
+	return b.String()
+}
+
 func (t *Tools) listFiles(args map[string]any) Classified {
 	spec, refused := t.pathspec(args)
 	if refused.Text != "" {
 		return refused
 	}
-	argv := append([]string{"ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate", "--"}, spec...)
+	argv := append([]string{"ls-files", "-z", "--cached", "--others", "--exclude-standard", "--deduplicate", "--"}, spec...)
 	res, err := t.repo().Run(argv...)
 	switch {
 	case err != nil:
@@ -572,7 +607,11 @@ func (t *Tools) listFiles(args map[string]any) Classified {
 	case res.Stdout == "":
 		return Classified{Text: "(no files)"}
 	}
-	return Classified{Text: trimTrailing(res.Stdout)}
+	names := strings.Split(strings.TrimSuffix(res.Stdout, "\x00"), "\x00")
+	for i, name := range names {
+		names[i] = renderPath(name)
+	}
+	return Classified{Text: strings.Join(names, "\n")}
 }
 
 func (t *Tools) searchText(args map[string]any) Classified {
@@ -584,13 +623,13 @@ func (t *Tools) searchText(args map[string]any) Classified {
 	if refused.Text != "" {
 		return refused
 	}
-	argv := append([]string{"grep", "-n", "-I", "-E", "--untracked", "-e", cString(pattern), "--"}, spec...)
+	argv := append([]string{"grep", "-z", "-n", "-I", "-E", "--untracked", "-e", cString(pattern), "--"}, spec...)
 	res, err := t.repo().Run(argv...)
 	switch {
 	case err != nil:
 		return failed(api.ToolErrorGit, "error: "+err.Error())
 	case res.Status == 0:
-		return Classified{Text: trimTrailing(res.Stdout)}
+		return Classified{Text: trimTrailing(renderMatches(res.Stdout))}
 	case res.Status == 1:
 		return Classified{Text: "(no matches)"}
 	}

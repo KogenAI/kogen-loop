@@ -124,6 +124,11 @@ func (r *olRepo) enter(key string) {
 func (r *olRepo) Run(args ...string) (tools.GitResult, error) {
 	key := olKey(args)
 	r.enter(key)
+	// ls-files answers in its -z form (a name ends with NUL). A grep answer is the bare key
+	// line: it has no NUL, so the tool keeps it as it came and the key is the result.
+	if len(args) > 0 && args[0] == "ls-files" {
+		return tools.GitResult{Stdout: key + "\x00"}, nil
+	}
 	return tools.GitResult{Stdout: key + "\n"}, nil
 }
 
