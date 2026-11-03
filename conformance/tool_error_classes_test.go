@@ -42,6 +42,8 @@ func TestSessionToolResultNamesErrorKindAndMalformedClass(t *testing.T) {
 		{"search_text", map[string]any{"pattern": "a"}, api.ToolErrorGit, ""},
 		{"list_files", map[string]any{"path": "~"}, api.ToolErrorOutsideRoot, ""},
 		{"search_text", map[string]any{"pattern": "a", "path": "a.txt/x"}, api.ToolErrorFile, ""},
+		{"search_text", map[string]any{"pattern": "("}, api.ToolErrorGit, ""},
+		{"search_text", map[string]any{"pattern": "(", "path": "../x"}, api.ToolErrorOutsideRoot, ""},
 		{"shell", map[string]any{"handle": "nope"}, api.ToolErrorUnknownShellHandle, ""},
 		{"shell", map[string]any{"command": "pkill -f nothing-at-all"}, api.ToolErrorForeignKill, ""},
 		{"shell", map[string]any{"command": "exit 3"}, "", ""},

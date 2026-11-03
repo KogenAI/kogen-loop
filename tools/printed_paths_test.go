@@ -100,7 +100,7 @@ func TestSearchRecordsKeepTheirText(t *testing.T) {
 	t.Parallel()
 	tl := &Tools{Root: t.TempDir(), Enabled: []string{SearchTextTool},
 		Repo: zRepo{grep: "a.txt\x001\x00x\x00y: z\nb.txt\x0012\x00last \n"}}
-	if got := run(t, tl, SearchTextTool, map[string]any{"pattern": "x"}); got != "a.txt:1:x\x00y: z\nb.txt:12:last" {
+	if got := run(t, tl, SearchTextTool, map[string]any{"pattern": "x|last"}); got != "a.txt:1:x\x00y: z\nb.txt:12:last" {
 		t.Errorf("search: %q", got)
 	}
 }

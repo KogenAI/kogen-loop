@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -567,9 +568,9 @@ func renderPath(p string) string {
 }
 
 // renderMatches turns the records of git grep -z -n, <path> NUL <number> NUL <text> LF, into
-// <rendered path>:<number>:<text> lines. A record that does not have that shape ends the
-// parse and is kept as it came.
-func renderMatches(out string) string {
+// <rendered path>:<number>:<text> lines, keeping only the records whose text matches re. A
+// record that does not have that shape ends the parse and is kept as it came.
+func renderMatches(out string, re *regexp.Regexp) string {
 	var b strings.Builder
 	for out != "" {
 		path, rest, ok := strings.Cut(out, "\x00")
@@ -583,11 +584,14 @@ func renderMatches(out string) string {
 			break
 		}
 		text, rest, hasLF := strings.Cut(rest, "\n")
+		out = rest
+		if !re.MatchString(text) {
+			continue
+		}
 		b.WriteString(renderPath(path) + ":" + num + ":" + text)
 		if hasLF {
 			b.WriteByte('\n')
 		}
-		out = rest
 	}
 	return b.String()
 }
@@ -623,13 +627,20 @@ func (t *Tools) searchText(args map[string]any) Classified {
 	if refused.Text != "" {
 		return refused
 	}
-	argv := append([]string{"grep", "-z", "-n", "-I", "-E", "--untracked", "-e", cString(pattern), "--"}, spec...)
+	re, err := regexp.Compile(cString(pattern))
+	if err != nil {
+		return failed(api.ToolErrorGit, "error: invalid pattern: "+strings.TrimPrefix(err.Error(), "error parsing regexp: "))
+	}
+	argv := append([]string{"grep", "-z", "-n", "-I", "-E", "--untracked", "-e", "", "--"}, spec...)
 	res, err := t.repo().Run(argv...)
 	switch {
 	case err != nil:
 		return failed(api.ToolErrorGit, "error: "+err.Error())
 	case res.Status == 0:
-		return Classified{Text: trimTrailing(renderMatches(res.Stdout))}
+		if text := trimTrailing(renderMatches(res.Stdout, re)); text != "" {
+			return Classified{Text: text}
+		}
+		return Classified{Text: "(no matches)"}
 	case res.Status == 1:
 		return Classified{Text: "(no matches)"}
 	}
