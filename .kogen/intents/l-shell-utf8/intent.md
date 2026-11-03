@@ -15,7 +15,7 @@ Fix L-SHELL-UTF8 in kogen-loop only. Normalize invalid UTF-8 to U+FFFD at the to
 ## Source comparison
 - Addressed: request Problem/Need and issue 79a070a8, research 31 Oct 2026: short invalid shell bytes currently survive until provider serialization; this contract requires valid text before serialization, identical to decoded wire text.
 - Addressed: request sh_binary evidence (3000 random bytes, reportedly 5.6 KB raw), main 733b50d and Kogen vendored 3e759e88 are historical evidence, not newly verified results. Regression uses a real shell printing 3000 random bytes plus deterministic malformed byte fixtures so reproduction cannot pass by chance.
-- Addressed: supplied reproduction reference https://github.com/KogenAI/kogen-bench/tree/abd51bf31f9e8937cba1298ad444043c03a4e53a/reproduce/loop-stream-shell-fault-fixtures/README.md is provenance, not a runtime dependency. Local shell and fake-provider tests reproduce the stated fault without fetching that pack.
+- Addressed: supplied reproduction reference historical kogen-bench revision `abd51bf31f9e8937cba1298ad444043c03a4e53a`, `reproduce/loop-stream-shell-fault-fixtures/README.md` is provenance, not a runtime dependency. Local shell and fake-provider tests reproduce the stated fault without fetching that pack.
 - Addressed: Acceptance evidence requires a fake provider to receive normalized text, unchanged valid multibyte output, and preserved over-16-KiB cuts; all are required below and in acceptance.feature. No requested behavior omitted or superseded. Kogen vendoring, publishing and new configuration are outside this fix.
 
 ## Tests

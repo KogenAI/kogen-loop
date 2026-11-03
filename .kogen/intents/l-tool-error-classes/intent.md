@@ -67,7 +67,7 @@ Unchanged and out of scope:
 - Addressed, constraints: there is no CLI command, flag, task field or option and no timeout change. Tests use a local scripted provider and fake credentials only.
 - Interpretation, decided here: "malformed tool call" means an executed call whose name or arguments the tool rejects. Non-object arguments never reach the tools, because the provider adapters refuse the whole response (stream.go `validItem`, chat.go `validCall`). Those stay classified in the attempt record as they are today.
 - Interpretation, decided here: a shell command that ran and exited nonzero is a command result, not a tool error, so `exit status: 3` carries no field.
-- Evidence: the research notes (`~/Scratch.noindex/kogen-lanes-private/notes-harness/climb/loop/LANE.md:46-60`, 107 retained Terra shape/build/review logs) were not present on this machine. They are motivation, not thresholds.
+- Evidence: the research notes (`<checkout>/research/loop/LANE.md:46-60`, 107 retained Terra shape/build/review logs) were not present on this machine. They are motivation, not thresholds.
 - Omitted, separate: K-TOOL-ARGS-LOG (kogen-executor, redacted tool-call arguments in Kogen run logs). Also omitted: Kogen's own hook-written logs and Kogen's vendored copy and pin.
 
 ## Tests

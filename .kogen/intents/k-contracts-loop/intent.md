@@ -52,7 +52,7 @@ How the cases are derived. Copy and adapt the consumers' cases that exercise the
 - kogen-shaping `shape/`: `approve`, `batch`, `contract_check`, `datastores`, `evidence`, `exec_state`, `force`, `helper`, `init`, `k18b`, `lineup_shape`, `lineup`, `loop_knobs`, `preflight`, `refine`, `response_budget`, `shape`, `window` (each `_test.go`).
 - kogen-build `build/`: `baseline_cache`, `build`, `cache_id`, `context`, `executor_native`, `executor`, `helper`, `hooks`, `k_review_verdict_strand`, `k_reviewretry2`, `k_reviewretry_safety`, `lineup`, `loop_ownership`, `material`, `records`, `recover`, `response_budget`, `review_batch`, `review_budget`, `review_delivery`, `review_lineup`, `review_parts_source`, `review_prefill`, `review_resume_external`, `unit` (each `_test.go`).
 
-The sources are readable on this host as `git --git-dir=/Users/kogen-runner/work.noindex/mirrors/<consumer>.git show <commit>:<path>`. A member used only by consumer production code is pinned with a case adapted from the consumer code that uses it.
+The sources were read from a local mirror using `git --git-dir=<checkout>/<consumer>.git show <commit>:<path>`. A member used only by consumer production code is pinned with a case adapted from the consumer code that uses it.
 
 The fixtures are synthetic only:
 - loopback `httptest` servers;

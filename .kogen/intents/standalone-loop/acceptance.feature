@@ -5,7 +5,7 @@ Feature: Adopt the independently callable Kogen Loop
   Scenario: Adopt source and preserve full truthful provenance
     Given the independent loop input is:
       """json
-      {"links":["docs/contract/loop-v1.md","api/","conformance/","LICENSE","NOTICE","docs/provenance/extraction.md","docs/provenance/loop-reference-manifest.json","docs/provenance/reference-README.md"],"provenance":["/Users/almirsarajcic/Areas/Kogen/studio-work/kogen-loop-extraction-20261026/sprint-30min/loop-reference.tar.gz","/Users/almirsarajcic/Areas/Kogen/studio-work/kogen-loop-extraction-20261026/sprint-30min/loop-reference-manifest.json","95520d37e26377bff74794eb9faa5cd67d0228f9b65fcf8e04c7e12f93dbfd40","65dc3a49a5f939ef5d761c2d6980184ae60f0c7dcfc47454f14ec405547fc51d","56eecd572a6e07184863939254a90d9a2dc44e96","Apache-2.0","26 October 2026","main.go","go.mod","README.md"]}
+      {"links":["docs/contract/loop-v1.md","api/","conformance/","LICENSE","NOTICE","docs/provenance/extraction.md","docs/provenance/loop-reference-manifest.json","docs/provenance/reference-README.md"],"provenance":["<checkout>/extraction/loop-reference.tar.gz","<checkout>/extraction/loop-reference-manifest.json","95520d37e26377bff74794eb9faa5cd67d0228f9b65fcf8e04c7e12f93dbfd40","65dc3a49a5f939ef5d761c2d6980184ae60f0c7dcfc47454f14ec405547fc51d","56eecd572a6e07184863939254a90d9a2dc44e96","Apache-2.0","26 October 2026","main.go","go.mod","README.md"]}
       """
     When I exercise the standalone loop through "adoption"
     Then the independent loop observation includes:

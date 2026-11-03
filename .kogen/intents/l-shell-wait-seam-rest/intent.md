@@ -70,7 +70,7 @@ A test fires a controlled wait only after the command has observably produced wh
   - The over-5-s list is a Build report obligation. In the scratch candidate these were TestShellLifecycleDeadlineStartup (12.8–16.4 s), TestCallerShellBoundCustody/exits and /ignores (about 6 s), TestTimeoutCustodyBlockedObservation/context and /interrupt (5.2–9.4 s), TestShellLifecycleKilledHostDescendants/finished_shell and /running_shell (about 5.4 s) and TestInterruptKillsAGroupThatIgnoresSIGTERM (5.1 s). None of them is a shell wait.
 - Addressed, Need "Never weaken an assertion; never raise a timeout or limit; synthetic cases only": the kept-assertion list per test above. The acceptance's watchdog limits are acceptance bounds, not product or test timeouts.
 - Addressed, Need "Report before/after suite wall time": the Report paragraph. This is not executable acceptance, because equal host load cannot be asserted.
-- Evidence, MacBook ~/logs go test -json on b099dfa: motivation only; not available in this checkout.
+- Evidence, MacBook <checkout>/logs go test -json on b099dfa: motivation only; not available in this checkout.
 - Omitted deliberately: production or documentation changes, Kogen changes, CHANGELOG.
 
 ## Tests
@@ -87,7 +87,7 @@ A test fires a controlled wait only after the command has observably produced wh
   - `escaping ignored`: LargeJSON 4/4 fail at 45.1 s. An earlier replacement `if mid <= maxResult {` did not compile (unused `b`), hence `if len(b) >= 0 {`.
   - `cancel keeps command`: 2/2 fail at 47.1 s, "command still exists".
   - `no round cleanup`: all 8 subtests fail at about 45 s with "writer alive at return".
-- Previous round: readiness reported the 120-second acceptance limit exceeded, because the unchanged tree took about 8 minutes. Runs cut off by a `go test` timeout or a kill had left `TestShellLifecycleYieldSnapshot` writer loops running in `GOTMPDIR` (`/Users/kogen-runner/work.noindex/gotmp`), which motivates the harness above. A `TMPDIR`-only reaper missed them: this Go roots `t.TempDir` in `GOTMPDIR`. The good control now checks by pid that the process left by a stopped test is gone, and fails when the reaper uses `TMPDIR` only.
+- Previous round: readiness reported the 120-second acceptance limit exceeded, because the unchanged tree took about 8 minutes. Runs cut off by a `go test` timeout or a kill had left `TestShellLifecycleYieldSnapshot` writer loops running in `GOTMPDIR` (`<checkout>/gotmp`), which motivates the harness above. A `TMPDIR`-only reaper missed them: this Go roots `t.TempDir` in `GOTMPDIR`. The good control now checks by pid that the process left by a stopped test is gone, and fails when the reaper uses `TMPDIR` only.
 - Scratch restatement (not submitted) of the three tests as specified above:
   - Their subtests passed in 0.07–2.3 s, and the whole suite took 33.7–45.1 s wall.
   - The four mutations failed every listed subtest in 0.1–2.1 s by their own assertions.

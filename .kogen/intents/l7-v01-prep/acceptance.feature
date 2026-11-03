@@ -18,7 +18,7 @@ Feature: Prepare v0.1 without releasing it
   Scenario: State current status with dated provenance
     Then README contains the L7 current status text
       """
-      As of 28 October 2026, Kogen adopted the caller-owned shell bound in commit `8793a7f`. Commit `c7e8331` fixed two Linux test flakes; both tests passed 50/50 on eu2.
+      As of 28 October 2026, Kogen adopted the caller-owned shell bound in commit `8793a7f`. Commit `c7e8331` fixed two Linux test flakes; both tests passed 50/50 on the Linux test host.
       """
     And README does not contain the L7 stale current claim "is not adopted by Kogen here"
     And README contains the L7 historical marker "Published and pinned baseline observed on 27 October 2026"
