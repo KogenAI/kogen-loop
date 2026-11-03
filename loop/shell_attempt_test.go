@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,5 +160,79 @@ func TestDiscardedAttemptStopsFastShellChild(t *testing.T) {
 	st.Abort()
 	if live() {
 		t.Fatal("child survived discarded attempt")
+	}
+}
+
+// Retirement shares one grace period and leaves a previously owned command usable.
+func TestDiscardedAttemptBatchPreservesOtherShell(t *testing.T) {
+	root := t.TempDir()
+	tl := &tools.Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{tools.ShellTool}, ShellAfter: yieldAfter(t, root, "other-ready")}
+	defer tl.EndShellRound()
+	other, err := tl.Run(tools.ShellTool, map[string]any{"command": ": > other-ready; while [ ! -f release-other ]; do sleep .05; done; echo survived"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept struct {
+		Status string `json:"status"`
+		Handle string `json:"handle"`
+	}
+	if err := json.Unmarshal([]byte(other.Text), &kept); err != nil || kept.Status != "running" || kept.Handle == "" {
+		t.Fatalf("other yield: %q %v", other.Text, err)
+	}
+	otherGroups := tl.Session.LiveGroups()
+	if len(otherGroups) != 1 {
+		t.Fatalf("other groups: %v", otherGroups)
+	}
+	st := newStage(context.Background(), tl, nil)
+	var handles []string
+	for i := 0; i < 3; i++ {
+		marker := fmt.Sprintf("batch-ready%d", i)
+		tl.ShellAfter = yieldAfter(t, root, marker)
+		st.Done(i, olShell(fmt.Sprintf("batch%d", i), "trap '' TERM; : > "+marker+"; while :; do :; done"))
+		st.mu.Lock()
+		g := st.gen
+		for len(g.slots) <= i || g.slots[i].state != finished {
+			st.cond.Wait()
+		}
+		text := g.slots[i].out.Text
+		st.mu.Unlock()
+		var result struct {
+			Status string `json:"status"`
+			Handle string `json:"handle"`
+		}
+		if err := json.Unmarshal([]byte(text), &result); err != nil || result.Status != "running" || result.Handle == "" {
+			t.Fatalf("yield %d: %q %v", i, text, err)
+		}
+		handles = append(handles, result.Handle)
+	}
+	started := time.Now()
+	st.Abort()
+	elapsed := time.Since(started)
+	for _, h := range handles {
+		out, err := tl.Run(tools.ShellTool, map[string]any{"handle": h})
+		if err != nil || out.Text != "error: unknown shell handle" {
+			t.Errorf("discarded handle: %q %v", out.Text, err)
+		}
+	}
+	groups := tl.Session.LiveGroups()
+	if len(groups) != 1 || groups[0] != otherGroups[0] {
+		t.Errorf("remaining groups: %v, want %v", groups, otherGroups)
+	}
+	if elapsed >= 10*time.Second {
+		t.Errorf("retirement took %v", elapsed)
+	}
+	if err := os.WriteFile(filepath.Join(root, "release-other"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := tl.Run(tools.ShellTool, map[string]any{"handle": kept.Handle})
+	var completed struct {
+		Status string `json:"status"`
+		Output string `json:"output"`
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(out.Text), &completed); err != nil || completed.Status != "completed" || !strings.Contains(completed.Output, "survived") {
+		t.Fatalf("other retrieval: %q %v", out.Text, err)
 	}
 }

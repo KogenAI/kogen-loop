@@ -632,6 +632,17 @@ func (t *Tools) EndShellRound() {
 	}
 }
 
+// SignalShellHandle cancels a yielded command without waiting or expiring its handle.
+func (t *Tools) SignalShellHandle(id string) {
+	r := t.registry()
+	r.mu.Lock()
+	j := r.jobs[id]
+	if j != nil {
+		j.cancel()
+	}
+	r.mu.Unlock()
+}
+
 // CancelShellHandle stops a yielded command whose staged result was discarded.
 func (t *Tools) CancelShellHandle(id string) {
 	r := t.registry()
