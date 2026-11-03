@@ -7,6 +7,7 @@ Standalone Go agent-loop library and CLI, using only the standard library. It re
 - [Caller contract v1](docs/contract/loop-v1.md): library `loop/v1`, process protocol `kogen-loop/v1`, strict tasks, events, errors, usage and cancellation.
 - [Public schema (`api/`)](api/) and [engine (`loop/`)](loop/): independently callable Go interfaces, optional host hooks and standalone sessions.
 - [Conformance tests and recorded fixtures](conformance/): offline library and built-process behavior.
+- [Consumer contract suite](contract/): pins the exported API, behaviours and formats kogen-loop's consumers use; it runs in `go test ./...`, and an intended interface change edits it together with paired consumer items.
 - [Testing rules](docs/testing-rules.md).
 - [Apache-2.0 license](LICENSE) and [NOTICE](NOTICE).
 - [Extraction and reconciliation record](docs/provenance/extraction.md), [full reference manifest](docs/provenance/loop-reference-manifest.json), and [original candidate README](docs/provenance/reference-README.md).
@@ -58,6 +59,7 @@ go build -o /dev/null ./...
 | `sys/` | Process groups, supervision, cancellation and typed errors |
 | `cmd/kogen-loop/` | Real standalone CLI entrypoint |
 | `conformance/` | Library/process tests and recorded exchanges |
+| `contract/` | Contract suite of what the consumers use (API, behaviours, file and wire formats), run by `go test ./...`; an intended interface change edits it together with paired consumer items |
 | `docs/contract/` | Maintained caller contract |
 | `docs/provenance/` | External source history and reconciliation |
 
