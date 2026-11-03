@@ -250,13 +250,17 @@ func (a attempts) Attempt(record map[string]any) {
 	a.s.emit(api.EventRequestAttempt, map[string]any{"n": a.s.requests, "record": record})
 }
 
-// condensed discloses one history condensation as a context.condensed event.
+// condensed discloses one history condensation, failed or not, as a context.condensed event.
 func (s *Session) condensed(c Condensation) {
-	s.emit(api.EventContextCondensed, map[string]any{
+	fields := map[string]any{
 		"n": s.requests, "requests": c.Requests, "condensed_exchanges": c.CondensedExchanges,
 		"kept_exchanges": c.KeptExchanges, "bytes_before": c.BytesBefore, "bytes_after": c.BytesAfter,
 		"limit": c.Limit, "summary_bytes": c.SummaryBytes, "usage": c.Usage,
-	})
+	}
+	if c.Failed {
+		fields["failed"] = true
+	}
+	s.emit(api.EventContextCondensed, fields)
 }
 
 func (s *Session) emit(typ string, fields map[string]any) {
