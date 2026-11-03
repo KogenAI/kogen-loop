@@ -168,11 +168,20 @@ func (t *Tools) Call(c Call) (Output, error) { return t.CallContext(nil, c) }
 
 // CallContext runs a response call like RunContext.
 func (t *Tools) CallContext(ctx context.Context, c Call) (Output, error) {
-	return t.RunContext(ctx, c.Name, c.Args())
+	classified, err := t.CallClassified(ctx, c)
+	return classified.Output(), err
 }
 
 // CallClassified runs a response call like RunClassified.
 func (t *Tools) CallClassified(ctx context.Context, c Call) (Classified, error) {
+	if slices.Contains(t.Enabled, c.Name) && (c.Name == ListFilesTool || c.Name == SearchTextTool) {
+		v, err := decodeJSONKeeping([]byte(c.Arguments), true)
+		args, ok := v.(map[string]any)
+		if err != nil || !ok {
+			return Classified{Text: "error: malformed arguments; expected a JSON object", MalformedClass: api.MalformedWrongArgumentType}, nil
+		}
+		return t.RunClassified(ctx, c.Name, args)
+	}
 	return t.RunClassified(ctx, c.Name, c.Args())
 }
 
@@ -196,13 +205,6 @@ func badArg(args map[string]any, key, msg string) Classified {
 }
 
 func failed(kind, text string) Classified { return Classified{Text: text, ErrorKind: kind} }
-
-func optionalPath(args map[string]any) string {
-	if p, ok := args["path"].(string); ok {
-		return p
-	}
-	return "."
-}
 
 // expand is the absolute, cleaned form of path against root; a leading ~ is the home folder.
 // Only write_file uses it: the reading tools are confined to the root (see contain).
@@ -633,7 +635,15 @@ func (t *Tools) session() *sys.Session {
 // pathspec is the Git path restriction for a path argument: none for the root itself. A path
 // that leaves the root, by name, home, `..` or a symlink, is refused with the error text.
 func (t *Tools) pathspec(args map[string]any) ([]string, Classified) {
-	path := cString(optionalPath(args)) // Git receives an argument only up to its first NUL
+	path := "."
+	if _, supplied := args["path"]; supplied {
+		var msg string
+		path, msg = stringArg(args, "path")
+		if msg != "" {
+			return nil, badArg(args, "path", msg)
+		}
+	}
+	path = cString(path) // Git receives an argument only up to its first NUL
 	// Git top-anchored pathspecs are relative to the Git worktree, which can be
 	// an ancestor of Tools.Root. They must not bypass root containment.
 	if strings.HasPrefix(path, ":/") || strings.HasPrefix(path, ":(") && strings.Contains(strings.SplitN(path, ")", 2)[0], "top") {

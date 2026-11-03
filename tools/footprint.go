@@ -57,7 +57,12 @@ func (t *Tools) footprint(name string, args map[string]any) footprint.Footprint 
 		if err != nil {
 			return barrier
 		}
-		path := cString(optionalPath(args))
+		spec, refused := t.pathspec(args)
+		if refused.Text != "" {
+			return barrier
+		}
+		path, _ := args["path"].(string)
+		path = cString(path)
 		// Git reads a pathspec, not a path: wildcards and pathspec magic can select
 		// anything below the root.
 		if strings.ContainsAny(path, "*?[\\:") {
@@ -69,10 +74,6 @@ func (t *Tools) footprint(name string, args map[string]any) footprint.Footprint 
 		}
 		// Git receives the pathspec as written when it stays inside the root, which a
 		// symlink followed by ".." can make another place than the resolved path.
-		spec, refused := t.pathspec(args)
-		if refused.Text != "" {
-			return barrier
-		}
 		reads := []string{phys}
 		if len(spec) > 0 {
 			reads = append(reads, filepath.Join(root, spec[0]))
