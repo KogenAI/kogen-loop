@@ -328,10 +328,12 @@ A `tool.result` is an error when its delivered text starts with `error: ` or `re
 |---|---|
 | `unknown_tool` | the name is not an enabled tool (unknown, or known but not enabled) |
 | `missing_argument` | a required string argument is absent: `path` of `read_file`, `write_file` and `view_image`, `content` of `write_file`, `pattern` of `search_text`; a `shell` call with neither a non-blank string `command` nor a non-blank string `handle` |
-| `wrong_argument_type` | that argument is present but not a string (JSON `null` included); a `shell` `command` that is not a string without a non-blank `handle` |
-| `conflicting_arguments` | a `shell` call with both a non-blank string `command` and a non-blank string `handle` |
+| `wrong_argument_type` | that argument is present but not a string (JSON `null` included); a `shell` `command` that is not a string without a non-blank `handle`; a `read_file` `start_line` or `end_line` that is not a JSON integer or is too large to represent |
+| `conflicting_arguments` | a `shell` call with both a non-blank string `command` and a non-blank string `handle`; a `read_file` `end_line` before its effective start |
 
-Where a tool checks several arguments the class follows the one the text names (`write_file` checks `path` before `content`).
+Where a tool checks several arguments the class follows the one the text names (`write_file` checks `path` before `content`; `read_file` checks `path`, then `start_line`, then `end_line`).
+
+`read_file` line ranges: a `start_line` or `end_line` that is not a JSON integer (a string, a number written with a fraction or an exponent, `null`, a boolean, an array, an object) returns `error: argument <name> must be an integer`, and a number too large to represent as a float64 (`1e999`) returns `error: argument <name> is a number too large to represent`; integers beyond int64 are still clamped. An `end_line` smaller than the effective start (`start_line` when at least 1, else 1) returns `error: end_line <end_line> is before start_line <start>` (`end_line 1` with `start_line 3` gives `error: end_line 1 is before start_line 3`), checked before the file is read. A `start_line` greater than the file's line count (a final newline ends the last line; an empty file has 0) returns the notice `(start_line <start> is past the end of <path>; line count: <N>)`, with `<path>` as given, and carries no error kind or malformed class; without `start_line` an empty file still returns an empty text. `tools.DecodeArguments` keeps an arguments object that holds a number too large for a float64, as a `json.Number` of its literal text.
 
 `error_kind`:
 

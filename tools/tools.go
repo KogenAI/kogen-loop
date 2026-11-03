@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -277,10 +278,30 @@ func (t *Tools) readFile(args map[string]any) Classified {
 	if msg != "" {
 		return badArg(args, "path", msg)
 	}
+	start, hasStart, bad := lineArg(args, "start_line")
+	if bad != nil {
+		return *bad
+	}
+	end, hasEnd, bad := lineArg(args, "end_line")
+	if bad != nil {
+		return *bad
+	}
+	from := max(start, 1)
+	if hasEnd && end < from {
+		return Classified{
+			Text:           "error: end_line " + strconv.FormatInt(end, 10) + " is before start_line " + strconv.FormatInt(from, 10),
+			MalformedClass: api.MalformedConflictingArguments,
+		}
+	}
 	data, err := t.readContained(path)
 	switch {
 	case err == nil:
-		return Classified{Text: numbered(string(data), args["start_line"], args["end_line"])}
+		text := string(data)
+		if lines := lineCount(text); hasStart && from > lines {
+			return Classified{Text: "(start_line " + strconv.FormatInt(from, 10) + " is past the end of " + path +
+				"; line count: " + strconv.FormatInt(lines, 10) + ")"}
+		}
+		return Classified{Text: numbered(text, args["start_line"], args["end_line"])}
 	case refusal(path, err) != "":
 		return failed(api.ToolErrorOutsideRoot, refusal(path, err))
 	case isErrno(err, syscall.ENOENT):
@@ -289,6 +310,34 @@ func (t *Tools) readFile(args map[string]any) Classified {
 		return failed(api.ToolErrorIsFolder, "error: "+path+" is a folder; use list_files")
 	}
 	return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
+}
+
+// lineArg is the optional line-number argument key: its value (clamped to int64) and
+// whether it is present, or the refused call when it is not a JSON integer.
+func lineArg(args map[string]any, key string) (int64, bool, *Classified) {
+	v, ok := args[key]
+	if !ok {
+		return 0, false, nil
+	}
+	if n, ok := integerValue(v); ok {
+		return n, true, nil
+	}
+	text := "error: argument " + key + " must be an integer"
+	if n, ok := v.(json.Number); ok {
+		if f, err := strconv.ParseFloat(n.String(), 64); err != nil || math.IsInf(f, 0) {
+			text = "error: argument " + key + " is a number too large to represent"
+		}
+	}
+	return 0, false, &Classified{Text: text, MalformedClass: api.MalformedWrongArgumentType}
+}
+
+// lineCount is the number of lines numbered shows: a final newline ends the last line.
+func lineCount(text string) int64 {
+	n := int64(strings.Count(text, "\n"))
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		n++
+	}
+	return n
 }
 
 // numbered is the lines from..to of text (1-based, inclusive) as `<n>\t<line>` joined by
