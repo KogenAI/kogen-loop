@@ -295,6 +295,9 @@ func (t *Tools) readFile(args map[string]any) Classified {
 	}
 	data, err := t.readContained(path)
 	switch {
+	case err == nil && (slices.Contains(data, 0) || !utf8.Valid(data)):
+		return Classified{Text: path + ": binary file, " + strconv.Itoa(len(data)) +
+			" bytes (contains a NUL byte or is not valid UTF-8); content not shown"}
 	case err == nil:
 		text := string(data)
 		if lines := lineCount(text); hasStart && from > lines {

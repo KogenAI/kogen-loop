@@ -205,6 +205,10 @@ stop what `claude` runs between hooks, or processes that leave the group.
 
 `read_file`, `view_image` and the optional `path` of `list_files` and `search_text` are confined to `tools.Tools.Root` (default path: the root). `~` and `~/...` are refused, not expanded. Absolute paths outside the root, parent escapes and symlinks that leave the root at any component (leaf or intermediate, relative or absolute target) are refused too, with tool text `error: <path>: <reason>` and no outside payload; `Tools.Run` still returns a nil Go error. Relative and absolute paths inside the root work, as do file and directory symlinks whose destinations stay inside it, and a `Root` that is itself a symlink. Symlinks are followed before a later `..` is applied, containment compares path components (not string prefixes), and the file is opened through `os.Root` on the canonical root. This is source-path containment, not a shell sandbox: `shell` and probe commands, documentation URLs, provider credential loading, transcript paths and `write_file` are unchanged, and no credential-specific denylist exists inside the root. There is no option to disable it.
 
+### Binary files in `read_file`
+
+`read_file` returns a file's lines as `<n>\t<line>` text, limited by `start_line` and `end_line`. When the whole content of the file contains a NUL byte or is not valid UTF-8, whatever `start_line` and `end_line` say, it returns instead exactly one line, `<path>: binary file, <N> bytes (contains a NUL byte or is not valid UTF-8); content not shown`, with `<path>` as the call gave it and `<N>` the byte count of the whole file. This is a normal text result, not an error: `error_kind` and the malformed class are empty and `Tools.Run` returns a nil Go error. There is no option for it and no error kind. `view_image` and its typed parts are unchanged.
+
 ### Shell time limit
 
 A shell call supplies exactly one string `command` or `handle`. A new command waits at most 45 seconds; retrieval waits at most 30 seconds. Both return
