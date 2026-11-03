@@ -43,7 +43,7 @@ func checkDelivery(t *testing.T, text string) {
 	if !strings.HasPrefix(text, head) || !strings.HasSuffix(text, tail) {
 		t.Fatal("the kept ends are not the ends of the text")
 	}
-	if len(head) < 4093 || len(head) > 4096 {
+	if len(head) > 4096 {
 		t.Fatalf("head %d bytes", len(head))
 	}
 	if omitted != len(text)-len(head)-len(tail) {

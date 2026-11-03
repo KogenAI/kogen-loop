@@ -802,8 +802,8 @@ func (t *Tools) probe(args map[string]any) (string, error) {
 // ---- cut ----
 
 // Cut bounds model-facing text to 16384 UTF-8 bytes including the omission marker (LOOP-8).
-// Invalid UTF-8 bytes are replaced before bounding. Valid fitting text is unchanged. Longer text keeps its first 4096 bytes and a suffix, each
-// backing off an incomplete UTF-8 character, around a marker that counts the bytes actually
+// Invalid UTF-8 bytes are replaced before bounding. Valid fitting text is unchanged. Longer text keeps complete lines within a 4096-byte head budget and a suffix budget,
+// falling back to UTF-8-safe byte cuts when no line boundary fits, around a marker that counts the bytes actually
 // absent; reserving the marker's width for the whole text's digit count is conservative and
 // may leave a few unused bytes. Cutting a cut text changes nothing. Typed image results
 // (Output.Cut) pass unchanged and the private originals a result was read from are never
@@ -821,8 +821,14 @@ func cutText(text string, bound, headSize int) string {
 	}
 	marker := func(n int) string { return fmt.Sprintf("\n[... %d bytes omitted ...]\n", n) }
 	head := validPrefix(text[:headSize])
+	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
+		head = head[:i+1]
+	}
 	tailSize := bound - headSize - len(marker(len(text)))
 	tail := validSuffix(text[len(text)-tailSize:])
+	if i := strings.IndexByte(tail, '\n'); i >= 0 {
+		tail = tail[i+1:]
+	}
 	return head + marker(len(text)-len(head)-len(tail)) + tail
 }
 

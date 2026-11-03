@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -88,5 +89,43 @@ func TestCutOfAnOutputPassesTypedPartsUnchanged(t *testing.T) {
 	long := Output{Text: strings.Repeat("y", 20_000)}
 	if got := long.Cut(); got.Typed() || len(got.Text) > 16_384 || got.Text != Cut(long.Text) {
 		t.Errorf("text output: %d bytes", len(got.Text))
+	}
+}
+
+func TestCutLineAligned(t *testing.T) {
+	var numbered strings.Builder
+	for i := 1; i <= 500; i++ {
+		fmt.Fprintf(&numbered, "%d\t%s\n", i, strings.Repeat("x", 79))
+	}
+	for name, text := range map[string]string{
+		"lines":    strings.Repeat(strings.Repeat("a", 79)+"\n", 500),
+		"numbered": numbered.String(),
+		"single":   strings.Repeat("x", 30000),
+		"unicode":  strings.Repeat("€", 10000),
+		"below":    strings.Repeat("x", 16383),
+		"at":       strings.Repeat("x", 16384),
+		"above":    strings.Repeat("x", 16385),
+	} {
+		t.Run(name, func(t *testing.T) {
+			checkDelivery(t, text)
+			got := Cut(text)
+			if len(text) <= 16384 {
+				return
+			}
+			m := omittedMarker.FindStringSubmatch(got)
+			head, tail := m[1], m[3]
+			tailBudget := 16384 - 4096 - len(fmt.Sprintf("\n[... %d bytes omitted ...]\n", len(text)))
+			wantHead := validPrefix(text[:4096])
+			wantTail := validSuffix(text[len(text)-tailBudget:])
+			if i := strings.LastIndexByte(wantHead, '\n'); i >= 0 {
+				wantHead = wantHead[:i+1]
+			}
+			if i := strings.IndexByte(wantTail, '\n'); i >= 0 {
+				wantTail = wantTail[i+1:]
+			}
+			if head != wantHead || tail != wantTail {
+				t.Fatal("incorrect retained ends")
+			}
+		})
 	}
 }

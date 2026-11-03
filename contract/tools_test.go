@@ -292,8 +292,8 @@ func TestToolsProbeBelongsToTheCaller(t *testing.T) {
 }
 
 // TestToolsShellRunsInTheRootAndCutsOutput pins the shell tool through Tools.Run and the cut of
-// its result by Output.Cut and tools.Cut: exactly 16384 bytes, the marker after the first
-// ~4096 bytes. Adapted from kogen cli/research_removal_test.go.
+// its result by Output.Cut and tools.Cut: the status line precedes the marker,
+// and the long output line falls back to a bounded byte suffix. Adapted from kogen cli/research_removal_test.go.
 func TestToolsShellRunsInTheRootAndCutsOutput(t *testing.T) {
 	s, root, _ := newSession(t)
 	tl := newTools(s, tools.ShellTool)
@@ -309,7 +309,7 @@ func TestToolsShellRunsInTheRootAndCutsOutput(t *testing.T) {
 	}
 	cut := out.Cut().Text
 	loc := strings.Index(cut, "\n[... ")
-	if len(cut) != 16384 || loc < 4090 || loc > 4096 || !strings.Contains(cut, "bytes omitted ...]") {
+	if len(cut) > 16384 || loc != len("exit status: 0\n") || !strings.Contains(cut, "bytes omitted ...]") {
 		t.Fatalf("%d bytes, marker at %d: %.120q", len(cut), loc, cut[max(0, loc-10):])
 	}
 	for _, text := range []string{out.Text, strings.Repeat("é", 20000), "short"} {
@@ -318,7 +318,7 @@ func TestToolsShellRunsInTheRootAndCutsOutput(t *testing.T) {
 		}
 	}
 	whole := tools.Cut(out.Text)
-	if len(whole) != 16384 || strings.Index(whole, "\n[... ") != loc || tools.Cut(whole) != whole || tools.Cut("short") != "short" {
+	if len(whole) > 16384 || strings.Index(whole, "\n[... ") != loc || tools.Cut(whole) != whole || tools.Cut("short") != "short" {
 		t.Fatalf("tools.Cut: %d bytes, marker at %d", len(whole), strings.Index(whole, "\n[... "))
 	}
 	typed := tools.Output{Parts: []any{map[string]any{"type": "input_text", "text": strings.Repeat("x", 20000)}}}

@@ -153,7 +153,7 @@ func TestShellResultNeedsCutWhenLong(t *testing.T) {
 		t.Fatalf("run result is %d bytes: tools return the whole output, callers cut", len(out.Text))
 	}
 	cut := out.Cut()
-	if len(cut.Text) > 16_384 || !strings.HasPrefix(cut.Text, "exit status: 0\nxxx") || !strings.Contains(cut.Text, " bytes omitted ...]\n") {
+	if len(cut.Text) > 16_384 || !strings.HasPrefix(cut.Text, "exit status: 0\n\n[... ") || !strings.Contains(cut.Text, " bytes omitted ...]\n") {
 		t.Errorf("cut %d bytes: %.60q", len(cut.Text), cut.Text)
 	}
 }
