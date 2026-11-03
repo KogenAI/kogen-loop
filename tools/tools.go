@@ -44,6 +44,16 @@ type Classified struct {
 	ErrorKind string
 	// MalformedClass is the api.Malformed* class of a call the tool rejected as wrong, "" otherwise.
 	MalformedClass string
+	// ShellWait is the bounded wait of a shell call that reached it, nil for every other call.
+	ShellWait *ShellWait
+}
+
+// ShellWait is the bounded wait of one shell call.
+type ShellWait struct {
+	Spawned     time.Time // zero: no process had started when the wait ended
+	WaitStarted time.Time
+	WaitEnded   time.Time
+	EndedBy     string // api.ShellWaitExit, api.ShellWaitBound or api.ShellWaitHandleYielded
 }
 
 // Output is what the model receives of the call.
@@ -680,6 +690,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		wait = 30 * time.Second
 	}
 	var elapsed <-chan time.Time
+	waitStarted := time.Now()
 	if t.ShellAfter != nil {
 		elapsed = t.ShellAfter(wait)
 	} else {
@@ -710,19 +721,32 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		}
 		return Classified{}, ctx.Err()
 	}
+	waitEnded := time.Now()
+	spawned := j.cmd.Started()
+	if spawned.After(waitEnded) {
+		spawned = time.Time{}
+	}
 	res, completed, err := j.cmd.Snapshot()
 	if err != nil {
 		return Classified{}, err
 	}
+	endedBy := api.ShellWaitExit
+	if !completed {
+		endedBy = api.ShellWaitHandleYielded
+		if hasHandle {
+			endedBy = api.ShellWaitBound
+		}
+	}
+	record := &ShellWait{Spawned: spawned, WaitStarted: waitStarted, WaitEnded: waitEnded, EndedBy: endedBy}
 	if !hasHandle && completed {
 		r.mu.Lock()
 		delete(r.jobs, id)
 		r.mu.Unlock()
 		j.cancel()
 		if res.Rule != "" {
-			return Classified{Text: res.Output, Rule: res.Rule, ErrorKind: api.ToolErrorForeignKill}, nil
+			return Classified{Text: res.Output, Rule: res.Rule, ErrorKind: api.ToolErrorForeignKill, ShellWait: record}, nil
 		}
-		return Classified{Text: "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output}, nil
+		return Classified{Text: "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output, ShellWait: record}, nil
 	}
 	output := res.Output
 	if !utf8.ValidString(output) {
@@ -750,7 +774,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		envelope["output"] = cutText(output, lo, lo/4)
 		raw, _ = json.Marshal(envelope)
 	}
-	return Classified{Text: string(raw)}, nil
+	return Classified{Text: string(raw), ShellWait: record}, nil
 }
 
 func (t *Tools) probe(args map[string]any) (string, error) {

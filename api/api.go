@@ -190,6 +190,13 @@ const (
 	ToolErrorInvalidImage       = "invalid_image"
 )
 
+// Shell wait endings: the "ended_by" of a tool.result event's "shell_wait" record.
+const (
+	ShellWaitExit          = "exit"
+	ShellWaitBound         = "bound"
+	ShellWaitHandleYielded = "handle_yielded"
+)
+
 // Malformed call classes: the "malformed_class" of a tool.result event whose call itself is wrong.
 const (
 	MalformedUnknownTool          = "unknown_tool"

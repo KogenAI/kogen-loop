@@ -284,6 +284,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	cutCalls := map[string]bool{}
 	rules := map[string]string{}
 	categories := map[string]map[string]any{}
+	shellWaits := map[string]map[string]any{}
 	s.requests = 0
 	rd := Round{
 		Owner: "loop", Role: s.cfg.Role, Instructions: s.instructions, Definitions: s.defs,
@@ -331,6 +332,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			} else if classified.MalformedClass != "" {
 				categories[fmt.Sprint(call.CallID())] = map[string]any{"malformed_class": classified.MalformedClass}
 			}
+			if w := classified.ShellWait; w != nil {
+				shellWaits[fmt.Sprint(call.CallID())] = shellWaitFields(w)
+			}
 			return Handled{Handled: true, Output: cut}, nil
 		},
 		AfterCall: func(ctx context.Context, call tools.Call, out tools.Output, terminal bool, in []any) error {
@@ -351,6 +355,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			}
 			for k, v := range categories[fmt.Sprint(call.CallID())] {
 				fields[k] = v
+			}
+			if w := shellWaits[fmt.Sprint(call.CallID())]; w != nil {
+				fields["shell_wait"] = w
 			}
 			s.emit(api.EventToolResult, fields)
 			return nil
@@ -507,4 +514,20 @@ func digest(text string) string {
 func definitionsDigest(defs []any) string {
 	data, _ := json.Marshal(defs)
 	return digest(string(data))
+}
+
+const shellWaitLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
+// shellWaitFields is the "shell_wait" object of a tool.result event: nine-digit RFC 3339 UTC
+// instants, with spawned null while no process had started.
+func shellWaitFields(w *tools.ShellWait) map[string]any {
+	instant := func(t time.Time) string { return t.UTC().Format(shellWaitLayout) }
+	var spawned any
+	if !w.Spawned.IsZero() {
+		spawned = instant(w.Spawned)
+	}
+	return map[string]any{
+		"spawned": spawned, "wait_started": instant(w.WaitStarted),
+		"wait_ended": instant(w.WaitEnded), "ended_by": w.EndedBy,
+	}
 }
