@@ -85,6 +85,9 @@ func TestToolsMatchTheElixirResults(t *testing.T) {
 				if text, ok := supersededByLineRange[c.Name+" "+c.Arguments]; ok {
 					wantText = text
 				}
+				if c.Name == SearchTextTool && c.Arguments == `{"pattern":"a\u0000b"}` {
+					wantText = "error: pattern contains a NUL character"
+				}
 				// The original replay wrote through link.txt to protected a.txt. Its
 				// refusal also changes subsequent reads and searches of that file.
 				switch i {

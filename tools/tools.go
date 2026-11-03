@@ -735,11 +735,14 @@ func (t *Tools) searchText(args map[string]any) Classified {
 	if msg != "" {
 		return badArg(args, "pattern", msg)
 	}
+	if strings.ContainsRune(pattern, 0) {
+		return failed(api.ToolErrorGit, "error: pattern contains a NUL character")
+	}
 	spec, refused := t.pathspec(args)
 	if refused.Text != "" {
 		return refused
 	}
-	re, err := regexp.Compile(cString(pattern))
+	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return failed(api.ToolErrorGit, "error: invalid pattern: "+strings.TrimPrefix(err.Error(), "error parsing regexp: "))
 	}
