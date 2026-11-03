@@ -404,6 +404,23 @@ func (t *Tools) writeFile(args map[string]any) Classified {
 	if slices.Contains(t.Protected, rel) {
 		return failed(api.ToolErrorProtected, "refused: "+rel+" is part of the approved acceptance baseline")
 	}
+	if strings.ContainsRune(abs, 0) {
+		return failed(api.ToolErrorFile, "error: "+path+": "+reason(errBadArg))
+	}
+	if len(t.Protected) > 0 {
+		root, err := resolvedWriteDestination(t.Root)
+		if err != nil {
+			return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
+		}
+		target, err := resolvedWriteDestination(abs)
+		if err != nil {
+			return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
+		}
+		rel = relativeTo(target, root)
+		if slices.Contains(t.Protected, rel) {
+			return failed(api.ToolErrorProtected, "refused: "+rel+" is part of the approved acceptance baseline")
+		}
+	}
 	if err := mkdirAll(filepath.Dir(abs)); err != nil {
 		return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 	}
@@ -411,6 +428,52 @@ func (t *Tools) writeFile(args map[string]any) Classified {
 		return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 	}
 	return Classified{Text: "ok"}
+}
+
+// resolvedWriteDestination follows links even when the eventual destination is missing.
+// It does not create directories or open the destination for writing.
+func resolvedWriteDestination(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	pending := splitPath(path)
+	target := string(os.PathSeparator)
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		if part == ".." {
+			target = filepath.Dir(target)
+			continue
+		}
+		candidate := filepath.Join(target, part)
+		st, err := os.Lstat(candidate)
+		if isErrno(err, syscall.ENOENT) {
+			target = candidate
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if st.Mode()&os.ModeSymlink == 0 {
+			target = candidate
+			continue
+		}
+		links++
+		if links > 40 {
+			return "", syscall.ELOOP
+		}
+		link, err := os.Readlink(candidate)
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(link) {
+			target = string(os.PathSeparator)
+		}
+		pending = append(splitPath(link), pending...)
+	}
+	return target, nil
 }
 
 // errBadArg is what a path with a NUL byte is: not a file name at all.

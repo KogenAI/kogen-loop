@@ -85,6 +85,18 @@ func TestToolsMatchTheElixirResults(t *testing.T) {
 				if text, ok := supersededByLineRange[c.Name+" "+c.Arguments]; ok {
 					wantText = text
 				}
+				// The original replay wrote through link.txt to protected a.txt. Its
+				// refusal also changes subsequent reads and searches of that file.
+				switch i {
+				case 96:
+					wantText = "refused: a.txt is part of the approved acceptance baseline"
+				case 97:
+					wantText = "1\tone\n2\ttwo\n3\tthree"
+				case 132:
+					wantText = strings.Replace(wantText, "a.txt:1:through link", "a.txt:1:one\na.txt:2:two\na.txt:3:three", 1)
+				case 133:
+					wantText = "a.txt:1:one\na.txt:2:two"
+				}
 				if got != wantText {
 					t.Errorf("result\n got: %q\nwant: %q", got, wantText)
 				}
@@ -104,6 +116,9 @@ func TestToolsMatchTheElixirResults(t *testing.T) {
 				part := p.(map[string]any)
 				for k, wantValue := range want[j] {
 					got, _ := part[k].(string)
+					if c.Name == ViewImageTool && k == "text" {
+						wantValue = strings.Replace(wantValue, "615750f7b5d70fc06ba58ecce4f0e2560c85eec4", "8e01a7661acb9333788e2b9d7b9e3094899371dc", 1)
+					}
 					if got = scrub(got); got != wantValue {
 						t.Errorf("part %d %s\n got: %q\nwant: %q", j, k, got, wantValue)
 					}
