@@ -442,6 +442,18 @@ Typed `sys.Error{Class, Reason, Detail, Exit}`. Provider errors keep their exist
   `last_byte_ms` and `last_progress_ms`. `stream_bytes` still counts every byte. The
   observations themselves change nothing; the only enforcement is the per-attempt
   first-byte and idle timeout and the visible output limit above, and requests, budgets and results are unchanged.
+- Every provider attempt record also carries two keys read as the attempt starts, on every route and
+  mode (completed, failed and cancelled attempts, `Request.Single`, condensation). `request_offset_ms`
+  is an integer: the whole milliseconds from the request start to this attempt's start, on the
+  `Client.Now` clock. The request start is the instant `Client.Respond` begins the call, the same one
+  from which the response budget counts and the same for every attempt of the call; the attempt start
+  is the instant of the record's `timestamp`. So time before the first attempt (a credential refresh)
+  counts in the first offset, and a later attempt's offset includes the earlier attempts and every
+  backoff, `Retry-After` and origin wait. `load_average` is the host's 1, 5 and 15 minute load averages
+  in that order, a JSON array of three numbers each rounded to two decimals (`[9.82, 8.26, 7.69]`), read
+  from `vm.loadavg` on darwin and `/proc/loadavg` on linux; it is `null` on any other platform and
+  whenever the read fails, which never fails or delays the attempt. Nothing else in the record, the
+  requests, retries, waits, budgets or results changes.
 - **Breaking changes** (removed or renamed field, changed meaning, changed engine order, changed default behavior) need `kogen-loop/v2` and `loop/v2`, and consumers must migrate deliberately.
 The external reference described a Kogen-owned synchronized copy at
 `cli/third_party/kogen-loop/`, a `replace` directive, sync script and
