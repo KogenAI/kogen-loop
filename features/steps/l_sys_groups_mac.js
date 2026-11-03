@@ -13,7 +13,7 @@ const root = process.cwd();
 const steps = __dirname;
 const owned = [];
 const NAME = 'TestLSysGroupsMacAcceptance';
-const PKG = 'kogen-loop/sys';
+const PKG = 'github.com/KogenAI/kogen-loop/sys';
 const EXPECTED = {alone: {others: false, error: ''}, member: {others: true, error: ''}};
 const UNFIXED = {alone: {others: true, error: ''}, member: {others: true, error: ''}};
 // sys/run_context_test.go as of 16f8974; the fix must not edit or weaken it.
@@ -136,7 +136,7 @@ if (require.main === module) {
     const what = '`' + r.command + '` exited ' + r.status + (r.signal ? ' (' + r.signal + ')' : '') + '\n' + r.stdout + r.stderr;
     assert.equal(r.error, null, what);
     assert.equal(r.status, 0, what);
-    assert.match(r.stdout, /^ok\s+kogen-loop\/sys\s/m, what);
+    assert.match(r.stdout, /^ok\s+github\.com\/KogenAI\/kogen-loop\/sys\s/m, what);
   });
   Then('the production files in sys add no sleep and the module adds no dependency', function () {
     const counts = {};

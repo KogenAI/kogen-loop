@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 func main() {

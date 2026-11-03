@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const os = require('node:os');
 const {spawnSync} = require('node:child_process');
 
-const PKG = 'kogen-loop/conformance';
+const PKG = 'github.com/KogenAI/kogen-loop/conformance';
 const END = ['pass', 'fail', 'skip'];
 
 const list = text => text.split('\n').map(s => s.trim()).filter(Boolean);

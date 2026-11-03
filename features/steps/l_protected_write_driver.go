@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 func must(err error) {

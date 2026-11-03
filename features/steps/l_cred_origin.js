@@ -12,6 +12,6 @@ Then('compatible origin regression must run and pass', function () {
   assert.ok(!r.error, context + '\n' + String(r.error || ''));
   assert.equal(r.status, 0, context);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const outcomes = events.filter(e => e.Package === 'kogen-loop/provider' && e.Test === this.credOriginName && ['pass', 'fail', 'skip'].includes(e.Action));
+  const outcomes = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && e.Test === this.credOriginName && ['pass', 'fail', 'skip'].includes(e.Action));
   assert.deepEqual(outcomes.map(e => e.Action), ['pass'], context + '\nRequired test absent, skipped, failed or ran zero times');
 });

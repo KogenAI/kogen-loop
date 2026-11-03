@@ -18,7 +18,7 @@ const {isDeepStrictEqual} = require('node:util');
 const {spawn, spawnSync} = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ALLOWED = ['kogen-loop/api', 'kogen-loop/loop', 'kogen-loop/provider', 'kogen-loop/sys', 'kogen-loop/tools'];
+const ALLOWED = ['github.com/KogenAI/kogen-loop/api', 'github.com/KogenAI/kogen-loop/loop', 'github.com/KogenAI/kogen-loop/provider', 'github.com/KogenAI/kogen-loop/sys', 'github.com/KogenAI/kogen-loop/tools'];
 const HEADER = '| Interface | Consumers | Derived from | Contract tests |';
 const NO_CONSUMES = 'kogen-loop depends on no other Kogen repository, so it has no consumes/ directory.';
 const DEPS_COMMAND = 'go list -deps -test ./...';
@@ -36,7 +36,7 @@ const SLOW_SECONDS = 30;
 const PARALLEL = 4;
 
 // OBSERVER type-checks the named packages of the tree it runs in, test files included, and
-// prints one JSON object: "uses", every exported member of kogen-loop/api, loop, provider, sys
+// prints one JSON object: "uses", every exported member of github.com/KogenAI/kogen-loop/api, loop, provider, sys
 // and tools the files use, as "<pkg>.<Name>" or "<pkg>.<Type>.<Member>"; "imports", every
 // import path of those files. It exits 2 when a named package is missing or does not
 // type-check.
@@ -67,7 +67,7 @@ type pkg struct {
 	Error                   *struct{ Err string }
 }
 
-var tracked = map[string]bool{"kogen-loop/api": true, "kogen-loop/loop": true, "kogen-loop/provider": true, "kogen-loop/sys": true, "kogen-loop/tools": true}
+var tracked = map[string]bool{"github.com/KogenAI/kogen-loop/api": true, "github.com/KogenAI/kogen-loop/loop": true, "github.com/KogenAI/kogen-loop/provider": true, "github.com/KogenAI/kogen-loop/sys": true, "github.com/KogenAI/kogen-loop/tools": true}
 
 func fail(format string, a ...any) {
 	fmt.Fprintln(os.Stderr, fmt.Sprintf(format, a...))
@@ -157,7 +157,7 @@ func member(obj types.Object, recv types.Type) string {
 	if obj == nil || obj.Pkg() == nil || !tracked[obj.Pkg().Path()] || !obj.Exported() {
 		return ""
 	}
-	short := strings.TrimPrefix(obj.Pkg().Path(), "kogen-loop/")
+	short := strings.TrimPrefix(obj.Pkg().Path(), "github.com/KogenAI/kogen-loop/")
 	switch o := obj.(type) {
 	case *types.Func:
 		if sig, ok := o.Type().(*types.Signature); ok && sig.Recv() != nil {
@@ -351,7 +351,7 @@ function inventoryObservation(inventory, used, imports, files, readme, tests) {
   for (const [consumer, commit] of Object.entries(SOURCES)) if (!readme.includes(commit)) o.missing_source_commits.push(consumer + ' ' + commit);
   o.foreign_imports = imports.filter(i => {
     const first = i.split('/')[0];
-    if (i.startsWith('kogen-loop/')) return !ALLOWED.includes(i) && !i.startsWith('kogen-loop/contract');
+    if (i.startsWith('github.com/KogenAI/kogen-loop/')) return !ALLOWED.includes(i) && !i.startsWith('github.com/KogenAI/kogen-loop/contract');
     return first.includes('.') || first === 'go';
   });
   o.parent_paths = Object.keys(files).filter(f => /["`]\.\.(?:[/"`])/.test(files[f]));
@@ -406,7 +406,7 @@ async function pool(items, fn) {
 // foreignPackages lists the packages `go list -deps -test` reports that are neither in the
 // standard library nor kogen-loop's own.
 function foreignPackages(listed) {
-  return listed.filter(l => !l.standard && !/^kogen-loop(\/| |\.test$|$)/.test(l.path)).map(l => l.path).sort();
+  return listed.filter(l => !l.standard && !/^github\.com\/KogenAI\/kogen-loop(\/| |\.test$|$)/.test(l.path)).map(l => l.path).sort();
 }
 function consumesDocs(readme) {
   const at = readme.indexOf('\n## Consumed Kogen repositories\n');
@@ -442,11 +442,11 @@ const SAMPLE_README = ['# Contract suite', '', 'Sources: ' + Object.values(SOURC
   '| `provider.Catalog` | kogen-setup | `kogen-setup/setup/init_route.go` | `TestCatalog`, `TestErrors` |',
   '| `sys.Session.RunContext` | kogen-verification, kogen-shaping | `kogen-verification/verify/probe.go` | `TestRunContext` |', ''].join('\n');
 const TESTS = ['TestErrors', 'TestCatalog', 'TestRunContext'];
-const IMPORTS = ['testing', 'net/http/httptest', 'kogen-loop/sys', 'kogen-loop/provider'];
+const IMPORTS = ['testing', 'net/http/httptest', 'github.com/KogenAI/kogen-loop/sys', 'github.com/KogenAI/kogen-loop/provider'];
 const sample = (o = {}) => inventoryObservation(SAMPLE, o.used || Object.keys(SAMPLE), o.imports || IMPORTS, o.files || {'contract/a_test.go':'p := filepath.Join(dir, "testdata", "x")'}, o.readme || SAMPLE_README, o.tests || TESTS);
 const DOCS = '# Contract suite\n\n## Consumed Kogen repositories\n\n' + NO_CONSUMES + ' `' + DEPS_COMMAND + '` lists only standard-library and kogen-loop packages.\n\n## Sources\n';
 const GOOD_DOCS = {section:true, states_no_consumes:true, names_the_check:true};
-const LISTED = [{standard:true, path:'context'}, {standard:false, path:'kogen-loop/sys'}, {standard:false, path:'kogen-loop/sys [kogen-loop/sys.test]'}, {standard:false, path:'kogen-loop/sys.test'}, {standard:false, path:'kogen-loop/cmd/kogen-loop'}];
+const LISTED = [{standard:true, path:'context'}, {standard:false, path:'github.com/KogenAI/kogen-loop/sys'}, {standard:false, path:'github.com/KogenAI/kogen-loop/sys [github.com/KogenAI/kogen-loop/sys.test]'}, {standard:false, path:'github.com/KogenAI/kogen-loop/sys.test'}, {standard:false, path:'github.com/KogenAI/kogen-loop/cmd/kogen-loop'}];
 // Each control case returns true when the observer accepted its input.
 const CONTROLS = {
   good:[
@@ -469,6 +469,7 @@ const CONTROLS = {
     async () => isDeepStrictEqual(sample({tests:['TestErrors', 'TestCatalog']}), EMPTY),
     async () => isDeepStrictEqual(sample({readme:SAMPLE_README.split('\n').filter(l => !l.includes('`provider.Catalog`')).join('\n')}), EMPTY),
     async () => isDeepStrictEqual(sample({readme:SAMPLE_README.replace(SOURCES['kogen-review'], 'cfc2fb29917c')}), EMPTY),
+    async () => isDeepStrictEqual(sample({imports:[...IMPORTS, 'github.com/KogenAI/kogen-loop/internal/delivery']}), EMPTY),
     async () => isDeepStrictEqual(sample({imports:[...IMPORTS, 'github.com/KogenAI/kogen-review/review']}), EMPTY),
     async () => isDeepStrictEqual(sample({files:{'contract/a_test.go':'os.ReadFile("../provider/wire.go")'}}), EMPTY),
     async () => isDeepStrictEqual(foreignPackages([...LISTED, {standard:false, path:'github.com/KogenAI/kogen-coordinator/project'}]), []),

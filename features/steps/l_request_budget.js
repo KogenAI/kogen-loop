@@ -12,5 +12,5 @@ Then('request budget test {string} in {string} ran and passed', function (name, 
   assert.ok(!r.error, detail);
   assert.equal(r.status, 0, detail);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert.deepEqual(events.filter(e => e.Package === 'kogen-loop/' + pkg.slice(2) && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action), ['pass'], 'Absent, skipped, failed or zero-run test: ' + detail);
+  assert.deepEqual(events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/' + pkg.slice(2) && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action), ['pass'], 'Absent, skipped, failed or zero-run test: ' + detail);
 });

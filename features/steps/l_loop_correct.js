@@ -5,7 +5,7 @@ function observe(r, name, command) {
   const detail = `${name}: ${command}; status=${r.status}; ${r.error || ''}\n${r.stdout || ''}${r.stderr || ''}`;
   assert.equal(r.status, 0, detail);
   const events = r.stdout.split('\n').filter(Boolean).map(x => JSON.parse(x));
-  const own = events.filter(e => e.Package === 'kogen-loop/conformance' && e.Test === name);
+  const own = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/conformance' && e.Test === name);
   assert.equal(own.filter(e => e.Action === 'run').length, 1, `${detail}\n${name} absent or ran zero/multiple times`);
   assert.equal(own.filter(e => e.Action === 'pass').length, 1, `${detail}\n${name} did not pass`);
   assert.ok(!events.some(e => ['skip', 'fail'].includes(e.Action)), `${detail}\n${name}: skipped or failed test/package`);
@@ -13,7 +13,7 @@ function observe(r, name, command) {
 if (require.main === module && process.argv[2] === '--control') {
   const name = 'TestLoopCorrectControl';
   const actions = process.argv[3] === 'good' ? ['run', 'pass'] : ['pass'];
-  const stdout = actions.map(Action => JSON.stringify({Package: 'kogen-loop/conformance', Test: name, Action})).join('\n') + '\n';
+  const stdout = actions.map(Action => JSON.stringify({Package: 'github.com/KogenAI/kogen-loop/conformance', Test: name, Action})).join('\n') + '\n';
   try { observe({status: 0, stdout}, name, 'control'); console.log('accepted'); }
   catch (_) { console.log('rejected'); process.exitCode = 1; }
 } else {

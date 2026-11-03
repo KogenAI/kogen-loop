@@ -15,7 +15,7 @@ Then('tool overlap test {string} must run and pass', function (name) {
   const events = (r.stdout || '').split('\n').filter(Boolean).map(line => {
     try { return JSON.parse(line); } catch (e) { assert.fail(`${diagnostic}\nInvalid go test JSON: ${line}`); }
   });
-  const own = events.filter(e => e.Package === 'kogen-loop/loop' && e.Test === name);
+  const own = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/loop' && e.Test === name);
   assert.equal(own.filter(e => e.Action === 'run').length, 1, `${diagnostic}\n${name} absent or ran zero/multiple times`);
   assert.deepEqual(own.filter(e => ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action), ['pass'], `${diagnostic}\n${name} absent, skipped or failed`);
   assert.equal(r.status, 0, diagnostic);

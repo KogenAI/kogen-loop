@@ -22,8 +22,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"kogen-loop/api"
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/api"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // Output is what a tool returns: text, or typed parts (the pixels of view_image), which the

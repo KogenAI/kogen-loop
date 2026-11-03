@@ -93,7 +93,7 @@ function execute(specs, mask, replay = false) {
 function report(r) {
   object(r,'report'); assert.equal(typeof r.stdout,'string','report.stdout'); assert.ok(Array.isArray(r.names),'report.names'); assert.equal(r.error,null,'process.error'); assert.equal(r.signal,null,'process.signal'); assert.equal(r.status,0,'process.status\n'+r.stdout+r.stderr); assert.equal(r.stderr,'','process.stderr');
   const events = r.stdout.trim().split('\n').map(s=>object(JSON.parse(s),'report.frame')); assert.ok(events.length,'report.empty');
-  assert.ok(events.every(e => e.Package === 'kogen-loop/conformance'),'report.package'); assert.ok(!events.some(e => ['skip','fail'].includes(e.Action)),'report.fail-or-skip');
+  assert.ok(events.every(e => e.Package === 'github.com/KogenAI/kogen-loop/conformance'),'report.package'); assert.ok(!events.some(e => ['skip','fail'].includes(e.Action)),'report.fail-or-skip');
   const count = (action,test) => events.filter(e => e.Action === action && e.Test === test).length;
   assert.equal(count('start',undefined),1,'report.start'); assert.equal(count('pass',undefined),1,'report.pass');
   for (const n of r.names) { assert.equal(count('run',n),1,'report.run.'+n); assert.equal(count('pass',n),1,'report.pass.'+n); }
@@ -204,7 +204,7 @@ function control(kind) {
   const line = 'provider failure: '+JSON.stringify(want);
   const row = {Name:'fixture',Facade:'Provider',Records:[rec],Error:{Class:'provider',Reason:'invalid_response',Detail:'malformed Anthropic completion',Exit:4,ProviderFailure:want,Lines:[line]},Rendered:first+'\n  '+line+'\n',First:first,Delivery:'unknown',Events:[],Stderr:'',Exit:4,Response:null,Wire:[{Body:'wire',Header:{}}],Sleeps:[],Hooks:0,Files:[]};
   const spec = {name:'fixture',facades:['Provider'],diagnostic:want,legacy:{Provider:legacy(row,true)}};
-  const event = (Action,Test,Output) => ({Package:'kogen-loop/conformance',Action,...(Test ? {Test}:{}),...(Output ? {Output}:{})});
+  const event = (Action,Test,Output) => ({Package:'github.com/KogenAI/kogen-loop/conformance',Action,...(Test ? {Test}:{}),...(Output ? {Output}:{})});
   const name = 'TestADCollector/fixture_Provider', long = clone(row); long.Wire[0].Body = 'x'.repeat(1600);
   const bytes = 'ADOBS '+JSON.stringify(long)+'\n';
   const frames = [event('start'),event('run','TestADCollector'),event('run',name),event('output',name,bytes.slice(0,1024)),event('output',name,bytes.slice(1024)),event('pass',name),event('pass','TestADCollector'),event('pass')];

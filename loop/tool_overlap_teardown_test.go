@@ -11,13 +11,13 @@ import (
 	"testing"
 	_ "unsafe" // go:linkname
 
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // shellStartHook is sys's test-only seam at the shell-start boundary ("enter", "starting",
 // "started"); nil outside the test that sets it.
 //
-//go:linkname shellStartHook kogen-loop/sys.startHook
+//go:linkname shellStartHook github.com/KogenAI/kogen-loop/sys.startHook
 var shellStartHook func(stage string)
 
 func olPidFile(t *testing.T, path string) int {

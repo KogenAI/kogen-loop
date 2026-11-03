@@ -4,7 +4,7 @@ const {spawnSync} = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const packages = ['kogen-loop/sys', 'kogen-loop/tools', 'kogen-loop/loop'];
+const packages = ['github.com/KogenAI/kogen-loop/sys', 'github.com/KogenAI/kogen-loop/tools', 'github.com/KogenAI/kogen-loop/loop'];
 const base = 'c7deffb648f6fff64b545f57aa71e33517ef6af2';
 function command(cmd, args, cwd) {
   const start = Date.now();
@@ -23,7 +23,7 @@ function run(cwd, race) {
 function counts(r, pkg) {
   const c = {};
   for (const e of r.events) {
-    if (e.Package !== pkg || !e.Test || !['pass','skip','fail'].includes(e.Action)) continue;
+    if (e.Package.replace(/^kogen-loop\//, 'github.com/KogenAI/kogen-loop/') !== pkg || !e.Test || !['pass','skip','fail'].includes(e.Action)) continue;
     const key = e.Test.split('/')[0] + ':' + e.Action;
     c[key] = (c[key] || 0) + 1;
   }
@@ -31,7 +31,7 @@ function counts(r, pkg) {
 }
 function checkRun(r, expected, parallel) {
   for (const pkg of packages) {
-    const ends = r.events.filter(e => e.Package === pkg && !e.Test && ['pass','fail','skip'].includes(e.Action));
+    const ends = r.events.filter(e => e.Package.replace(/^kogen-loop\//, 'github.com/KogenAI/kogen-loop/') === pkg && !e.Test && ['pass','fail','skip'].includes(e.Action));
     assert.equal(ends.length, 1, `${r.command}: ${pkg} package result missing/duplicated`);
     assert.equal(ends[0].Action, 'pass', `${r.command}: ${pkg} did not pass`);
     const actual = counts(r, pkg);
@@ -60,7 +60,8 @@ function fixture() {
     return {wall, command:'fixture go test ./sys ./tools ./loop', events:packages.flatMap(Package => [
       ...['TestA','TestB'].flatMap(Test => [...(parallel ? [{Package,Test,Action:'pause'},{Package,Test,Action:'cont'}] : []),{Package,Test,Action:'pass'}]),{Package,Action:'pass'}])};
   }
-  return {before:[r(false,4),r(false,5),r(false,6)],after:[r(true,1),r(true,2),r(true,3)],raceBefore:r(false,5),raceAfter:r(true,2)};
+  const old = run => ({...run, events:run.events.map(e => ({...e, Package:e.Package.replace('github.com/KogenAI/kogen-loop/', 'kogen-loop/')}))});
+  return {before:[old(r(false,4)),old(r(false,5)),old(r(false,6))],after:[r(true,1),r(true,2),r(true,3)],raceBefore:old(r(false,5)),raceAfter:r(true,2)};
 }
 function measure() {
   assert.equal(process.platform,'darwin','acceptance measurements require the MacBook');

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // The two key providers differ only in names and in the reason their login failures carry.

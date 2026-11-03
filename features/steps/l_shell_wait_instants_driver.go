@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // ns is an instant as decimal Unix nanoseconds ("" for the zero time).

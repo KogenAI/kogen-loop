@@ -29,7 +29,7 @@ function decisions(mask, control=false, mutant='') {
 function events(r) {
   assert.equal(r.stderr,'','unexpected diagnostics');
   const es=r.stdout.trim().split('\n').map(x=>JSON.parse(x));
-  assert.ok(es.length); assert.ok(es.every(x=>x.Package==='kogen-loop/sys')); return es;
+  assert.ok(es.length); assert.ok(es.every(x=>x.Package==='github.com/KogenAI/kogen-loop/sys')); return es;
 }
 function observe(r, wanted) {
   assert.equal(r.status,0,r.stdout+r.stderr); const es=events(r);

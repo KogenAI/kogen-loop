@@ -7,7 +7,7 @@ import (
 	"strings"
 	"syscall"
 
-	"kogen-loop/internal/footprint"
+	"github.com/KogenAI/kogen-loop/internal/footprint"
 )
 
 func init() {

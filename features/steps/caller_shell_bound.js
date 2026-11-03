@@ -33,7 +33,7 @@ function execute(c, mask = '077') {
       GOCACHE: path.join(d, 'cache'), GOPATH: path.join(d, 'gopath'), GOENV: 'off', GOTOOLCHAIN: 'local', GOPROXY: 'off', GOSUMDB: 'off', CS_BOUND_CASE: JSON.stringify(c)},
     encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024
   });
-  return {status: r.status, signal: r.signal, error: r.error ? r.error.message : null, stdout: r.stdout || '', stderr: r.stderr || '', pkg: 'kogen-loop/' + pkg, names};
+  return {status: r.status, signal: r.signal, error: r.error ? r.error.message : null, stdout: r.stdout || '', stderr: r.stderr || '', pkg: 'github.com/KogenAI/kogen-loop/' + pkg, names};
 }
 function verifyReport(r) {
   assert.equal(r.error, null, 'process.error');
@@ -109,10 +109,10 @@ function control(kind) {
     leaderGone: true, sameGroup: true, goneAtPublish: true, published: 1, requests: 2, ending: 'terminal',
     nextOutputs: [{type: 'function_call_output', call_id: 'c1', output: 'timed out after 1s\nexit status: 137\npartial\n'}],
     definitionsStable: true};
-  const event = (Action, Test, Output) => ({Package: 'kogen-loop/conformance', Action, ...(Test ? {Test} : {}), ...(Output ? {Output} : {})});
+  const event = (Action, Test, Output) => ({Package: 'github.com/KogenAI/kogen-loop/conformance', Action, ...(Test ? {Test} : {}), ...(Output ? {Output} : {})});
   const name = 'TestCallerShellBoundAcceptance';
   const frames = [event('start'), event('run', name), event('output', name, 'CSOBS ' + JSON.stringify(want) + '\n'), event('pass', name), event('pass')];
-  const report = ev => ({status: 0, signal: null, error: null, stderr: '', stdout: ev.map(e => JSON.stringify(e)).join('\n') + '\n', pkg: 'kogen-loop/conformance', names: [name]});
+  const report = ev => ({status: 0, signal: null, error: null, stderr: '', stdout: ev.map(e => JSON.stringify(e)).join('\n') + '\n', pkg: 'github.com/KogenAI/kogen-loop/conformance', names: [name]});
   // ASCII makes this an exact byte-boundary reproducer of test2json's split:
   // the first 1024-byte frame ends inside a JSON string, with no newline.
   const longWant = {commandOnly: true, description: 'x'.repeat(1300), zeroBytesEqual: true};

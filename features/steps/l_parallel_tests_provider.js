@@ -19,7 +19,7 @@ if (require.main === module) {
     assert.ok(r && !r.error, 'go test -json -count=1 ./provider failed to execute: ' + String(r && r.error));
     assert.equal(r.status, 0, 'go test -json -count=1 ./provider failed\n' + r.stdout + r.stderr);
     const events = r.stdout.split('\n').filter(Boolean).map(s => JSON.parse(s));
-    assert.ok(events.some(e => e.Package === 'kogen-loop/provider' && !e.Test && e.Action === 'pass'), 'go test ./provider package result missing');
+    assert.ok(events.some(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && !e.Test && e.Action === 'pass'), 'go test ./provider package result missing');
     assert.ok(parallel(events), 'go test ./provider: independent tests never paused and continued for parallel scheduling');
   });
 }

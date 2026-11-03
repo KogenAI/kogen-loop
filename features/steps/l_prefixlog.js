@@ -12,6 +12,6 @@ Then('prefix logging test {string} must pass for {string}', function (name, rule
   assert.ifError(r.error);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const outcomes = events.filter(e => e.Package === 'kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action));
+  const outcomes = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action));
   assert.deepEqual(outcomes.map(e => e.Action), ['pass'], rule + ': required behavioral test did not run and pass: ' + name + '\n' + r.stdout);
 });

@@ -129,14 +129,14 @@ if (require.main === module) {
   };
   // rejected requires the harness itself to have run and failed for the named reason.
   const rejected = (run, reason) => {
-    const out = run.output['kogen-loop/tools TestAcceptShellWaitSeam'] || '';
-    if (!run.tests['kogen-loop/tools TestAcceptShellWaitSeam'] || !out.includes(reason)) throw new Error('harness did not fail with ' + JSON.stringify(reason) + ':\n' + run.raw.slice(-4000));
-    passed(run, 'TestAcceptShellWaitSeam', 'kogen-loop/tools', 20);
+    const out = run.output['github.com/KogenAI/kogen-loop/tools TestAcceptShellWaitSeam'] || '';
+    if (!run.tests['github.com/KogenAI/kogen-loop/tools TestAcceptShellWaitSeam'] || !out.includes(reason)) throw new Error('harness did not fail with ' + JSON.stringify(reason) + ':\n' + run.raw.slice(-4000));
+    passed(run, 'TestAcceptShellWaitSeam', 'github.com/KogenAI/kogen-loop/tools', 20);
   };
   const record = (action, elapsed, raw = '', ran = !!action) => ({command:'go test (control)', cwd:'control', status:action === 'pass' ? 0 : 1, error:'', tests:action ? {'p T':{action, elapsed}} : {}, ran:ran ? {'p T':true} : {}, output:{}, raw});
   try {
     if (process.argv[2] === '--control' && process.argv[3] === 'good') {
-      passed(harness(SEAM), 'TestAcceptShellWaitSeam', 'kogen-loop/tools', 20);
+      passed(harness(SEAM), 'TestAcceptShellWaitSeam', 'github.com/KogenAI/kogen-loop/tools', 20);
       for (const name of Object.keys(MUTATIONS)) { const dir = privateCopy(dirs); mutate(dir, name); }
       passed(record('pass', 2), 'T', 'p', 10);
       failed(record('fail', 3), 'T', 'p', 30);

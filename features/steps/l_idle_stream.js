@@ -34,7 +34,7 @@ Then('idle stream test {string} in package {string} passes for {string}', functi
     }
   }
   const outcomes = events
-    .filter(e => e.Package === 'kogen-loop/' + pkg && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action))
+    .filter(e => e.Package === 'github.com/KogenAI/kogen-loop/' + pkg && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action))
     .map(e => e.Action);
   const output = events.filter(e => e.Action === 'output').map(e => e.Output).join('') || r.stdout;
   assert.deepEqual(outcomes, ['pass'], context + 'exit ' + r.status + '; ' + name + ' was absent, skipped, failed or ran zero times; outcomes=' + JSON.stringify(outcomes) + '\n' + output + r.stderr);

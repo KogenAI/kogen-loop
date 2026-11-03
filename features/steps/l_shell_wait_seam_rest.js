@@ -245,7 +245,7 @@ async function control(mode) {
   // process it left is reaped; matching records are accepted. Bad: wrong real and synthetic records,
   // a stopped run and a repeated anchor are rejected.
   const dirs = [];
-  const fast = ['TestShellYieldLargeMalformedOutput', 'kogen-loop/tools'];
+  const fast = ['TestShellYieldLargeMalformedOutput', 'github.com/KogenAI/kogen-loop/tools'];
   const runFast = dir => goTest(dir, ['-run', '^' + fast[0] + '$', './tools'], 10, true);
   const lingering = async () => {
     const dir = privateCopy(dirs);
@@ -269,7 +269,7 @@ async function control(mode) {
       allFailed(broken['unbounded envelope'], [fast], 20);
       failedByMutation(broken, [['unbounded envelope', ...fast]], 20);
       const stopped = await lingering();
-      assert.ok(stopped.stopped.startsWith('kogen-loop/tools TestZZWatchdogControl was still running after 2 s'), 'watchdog: ' + stopped.stopped);
+      assert.ok(stopped.stopped.startsWith('github.com/KogenAI/kogen-loop/tools TestZZWatchdogControl was still running after 2 s'), 'watchdog: ' + stopped.stopped);
       assert.ok(stopped.wall < 20, 'watchdog stopped the run after ' + stopped.wall + ' s');
       assert.deepEqual(stopped.survivors, []);
       assert.ok(stopped.lingerPid > 1, 'linger.pid: ' + stopped.lingerPid);
@@ -285,13 +285,13 @@ async function control(mode) {
       const absent = await goTest(process.cwd(), ['-run', '^TestShellYieldLargeJSONAbsent$', './tools'], 10, true);
       const stopped = await lingering();
       const rejects = [
-        () => allPassed(absent, [['TestShellYieldLargeJSONAbsent', 'kogen-loop/tools']], 10),
+        () => allPassed(absent, [['TestShellYieldLargeJSONAbsent', 'github.com/KogenAI/kogen-loop/tools']], 10),
         () => allFailed(real, [fast], 20),
         () => failedByMutation({'unbounded envelope': real}, [['unbounded envelope', ...fast]], 20),
         () => failedByMutation({}, [['unbounded envelope', ...fast]], 20),
-        () => suiteBounded(absent, [['TestShellYieldLargeJSONAbsent', 'kogen-loop/tools']], 30),
-        () => allPassed(stopped, [['TestZZWatchdogControl', 'kogen-loop/tools']], 10),
-        () => allFailed(stopped, [['TestZZWatchdogControl', 'kogen-loop/tools']], 20),
+        () => suiteBounded(absent, [['TestShellYieldLargeJSONAbsent', 'github.com/KogenAI/kogen-loop/tools']], 30),
+        () => allPassed(stopped, [['TestZZWatchdogControl', 'github.com/KogenAI/kogen-loop/tools']], 10),
+        () => allFailed(stopped, [['TestZZWatchdogControl', 'github.com/KogenAI/kogen-loop/tools']], 20),
         () => suiteBounded(stopped, [], 30),
         () => allPassed(record([['T', null, 0]]), [['T', 'p']], 10),
         () => allPassed(record([]), [['T', 'p']], 10),
@@ -308,7 +308,7 @@ async function control(mode) {
         () => suiteBounded(record([['T', 'pass', 2], ['T/a', 'pass', 45.06]]), [['T', 'p']], 30),
         () => suiteBounded(record([['T', 'pass', 2], ['U', 'pass', 30]]), [['T', 'p']], 30),
         () => suiteBounded(record([['T', 'pass', 2]], 'panic: test timed out after 100s'), [['T', 'p']], 30),
-        () => suiteBounded(record([['T', 'pass', 2]], 'FAIL\tkogen-loop/tools [build failed]'), [['T', 'p']], 30),
+        () => suiteBounded(record([['T', 'pass', 2]], 'FAIL\tgithub.com/KogenAI/kogen-loop/tools [build failed]'), [['T', 'p']], 30),
         () => suiteBounded(record([['T', 'pass', 2]], '', {error:'Error: spawn go ENOENT'}), [['T', 'p']], 30),
         () => suiteBounded(record([['T', 'fail', 2]]), [['T', 'p']], 30),
         () => suiteBounded(record([['U', 'pass', 2]]), [['T', 'p']], 30),

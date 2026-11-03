@@ -14,5 +14,5 @@ Then('response budget behavior test {string} passes', function (name) {
   assert.ifError(r.error);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert.deepEqual(events.filter(e => e.Package === 'kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action), ['pass'], 'Required behavior test did not run and pass: ' + name + '\n' + r.stdout);
+  assert.deepEqual(events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action), ['pass'], 'Required behavior test did not run and pass: ' + name + '\n' + r.stdout);
 });

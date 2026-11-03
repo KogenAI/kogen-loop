@@ -17,7 +17,7 @@ const {isDeepStrictEqual} = require('node:util');
 const {spawn, spawnSync} = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ALLOWED = ['kogen-loop/api', 'kogen-loop/loop', 'kogen-loop/provider', 'kogen-loop/sys', 'kogen-loop/tools'];
+const ALLOWED = ['github.com/KogenAI/kogen-loop/api', 'github.com/KogenAI/kogen-loop/loop', 'github.com/KogenAI/kogen-loop/provider', 'github.com/KogenAI/kogen-loop/sys', 'github.com/KogenAI/kogen-loop/tools'];
 const HEADER = '| Interface | Consumers | Derived from | Contract tests |';
 const RULE = 'An intended interface change edits this contract together with paired consumer items.';
 const SLOW_SECONDS = 30;
@@ -157,7 +157,7 @@ function inventoryObservation(inventory, used, rows, tests) {
 function independence(imports, files) {
   const foreign = imports.filter(i => {
     const first = i.split('/')[0];
-    if (i.startsWith('kogen-loop/')) return !ALLOWED.includes(i) && !i.startsWith('kogen-loop/contract');
+    if (i.startsWith('github.com/KogenAI/kogen-loop/')) return !ALLOWED.includes(i) && !i.startsWith('github.com/KogenAI/kogen-loop/contract');
     return first.includes('.') || first === 'go';
   });
   const parent = Object.keys(files).filter(f => /["`]\.\.(?:[/"`])/.test(files[f])).sort();
@@ -253,7 +253,7 @@ const CONTROLS = {
     async () => (await outcome(CUT_HEAD, ['./tools'], CUT_TEST)) === 'contract failed',
     async () => { const t = copyTree(); try { const u = await uses(t, ['./cmd/kogen-loop']); return u.uses.includes('api.DecodeTask') && u.uses.includes('loop.NewSession') && isDeepStrictEqual(independence(u.imports, {}), {foreign_imports:[], parent_paths:[]}); } finally { fs.rmSync(t, {recursive:true, force:true}); } },
     async () => isDeepStrictEqual(inventoryObservation(SAMPLE, Object.keys(SAMPLE), readmeRows(SAMPLE_README), ['TestErrors', 'TestCut', 'TestBody']), EMPTY_INVENTORY),
-    async () => isDeepStrictEqual(independence(['testing', 'net/http/httptest', 'kogen-loop/sys', 'kogen-loop/tools'], {'contract/a_test.go':'p := filepath.Join(dir, "testdata", "x")'}), {foreign_imports:[], parent_paths:[]}),
+    async () => isDeepStrictEqual(independence(['testing', 'net/http/httptest', 'github.com/KogenAI/kogen-loop/sys', 'github.com/KogenAI/kogen-loop/tools'], {'contract/a_test.go':'p := filepath.Join(dir, "testdata", "x")'}), {foreign_imports:[], parent_paths:[]}),
   ],
   bad:[
     async () => { const t = copyTree(); try { fs.writeFileSync(path.join(t, 'tools', 'tools.go'), fs.readFileSync(path.join(t, 'tools', 'tools.go'), 'utf8').replace(CUT_HEAD.from, CUT_HEAD.to)); return isDeepStrictEqual(await suite(t, ['./tools'], CUT_TEST), GOOD_SUITE); } finally { fs.rmSync(t, {recursive:true, force:true}); } },
@@ -265,6 +265,7 @@ const CONTROLS = {
     async () => isDeepStrictEqual(inventoryObservation(SAMPLE, Object.keys(SAMPLE), readmeRows(SAMPLE_README.replace('`kogen-build/build/cache_id_test.go`', '`kogen-shaping/shape/x_test.go`')), ['TestErrors', 'TestCut', 'TestBody']), EMPTY_INVENTORY),
     async () => isDeepStrictEqual(inventoryObservation(SAMPLE, Object.keys(SAMPLE), readmeRows(SAMPLE_README), ['TestErrors', 'TestCut']), EMPTY_INVENTORY),
     async () => isDeepStrictEqual(inventoryObservation(SAMPLE, Object.keys(SAMPLE), readmeRows(SAMPLE_README.split('\n').filter(l => !l.includes('`tools.Cut`')).join('\n')), ['TestErrors', 'TestCut', 'TestBody']), EMPTY_INVENTORY),
+    async () => isDeepStrictEqual(independence(['testing', 'github.com/KogenAI/kogen-loop/internal/delivery'], {}), {foreign_imports:[], parent_paths:[]}),
     async () => isDeepStrictEqual(independence(['testing', 'github.com/KogenAI/kogen-build/build'], {}), {foreign_imports:[], parent_paths:[]}),
     async () => isDeepStrictEqual(independence(['testing', 'go/parser'], {}), {foreign_imports:[], parent_paths:[]}),
     async () => isDeepStrictEqual(independence(['testing'], {'contract/a_test.go':'os.ReadFile("../provider/wire.go")'}), {foreign_imports:[], parent_paths:[]}),

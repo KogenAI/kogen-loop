@@ -1,6 +1,6 @@
 // Contract usage observer of K-CONTRACTS-LOOP. Run it in a kogen-loop checkout with package
 // patterns (for example ./contract/...). It type-checks those packages, their test files
-// included, and prints one JSON object: "uses", every exported member of kogen-loop/api, loop,
+// included, and prints one JSON object: "uses", every exported member of github.com/KogenAI/kogen-loop/api, loop,
 // provider, sys and tools the files use, as "<pkg>.<Name>" or "<pkg>.<Type>.<Member>";
 // "imports", every import path of those files; "files", the Go files it read. It exits 2 when
 // a named package is missing or does not type-check.
@@ -30,7 +30,7 @@ type pkg struct {
 	Error                            *struct{ Err string }
 }
 
-var tracked = map[string]bool{"kogen-loop/api": true, "kogen-loop/loop": true, "kogen-loop/provider": true, "kogen-loop/sys": true, "kogen-loop/tools": true}
+var tracked = map[string]bool{"github.com/KogenAI/kogen-loop/api": true, "github.com/KogenAI/kogen-loop/loop": true, "github.com/KogenAI/kogen-loop/provider": true, "github.com/KogenAI/kogen-loop/sys": true, "github.com/KogenAI/kogen-loop/tools": true}
 
 func fail(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
@@ -126,7 +126,7 @@ func member(obj types.Object, recv types.Type) string {
 	if obj == nil || obj.Pkg() == nil || !tracked[obj.Pkg().Path()] || !obj.Exported() {
 		return ""
 	}
-	short := strings.TrimPrefix(obj.Pkg().Path(), "kogen-loop/")
+	short := strings.TrimPrefix(obj.Pkg().Path(), "github.com/KogenAI/kogen-loop/")
 	switch o := obj.(type) {
 	case *types.Func:
 		if sig, ok := o.Type().(*types.Signature); ok && sig.Recv() != nil {

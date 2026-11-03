@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // TestErrorLine pins the error line `<class>/<reason>: <detail>` and its `\n` form.

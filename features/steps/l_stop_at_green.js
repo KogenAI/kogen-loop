@@ -20,7 +20,7 @@ function readDefaultInstructions() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l-stop-at-green-const-'));
   try {
     const source = path.join(dir, 'main.go');
-    fs.writeFileSync(source, 'package main\nimport ("fmt"; "kogen-loop/loop")\nfunc main() { fmt.Print(loop.DefaultInstructions) }\n');
+    fs.writeFileSync(source, 'package main\nimport ("fmt"; "github.com/KogenAI/kogen-loop/loop")\nfunc main() { fmt.Print(loop.DefaultInstructions) }\n');
     const r = spawnSync(goBuild(dir, [source]), [], {encoding: 'utf8', timeout: 10000});
     assert.ifError(r.error);
     assert.equal(r.status, 0, 'default instructions consumer failed:\n' + r.stdout + r.stderr);

@@ -28,7 +28,7 @@ function report(r) {
   assert.equal(r.stderr, '', 'process.stderr');
   const events = r.stdout.trim().split('\n').map(x => JSON.parse(x));
   assert.ok(events.length > 0, 'events.empty');
-  assert.ok(events.every(x => x.Package === 'kogen-loop/conformance'), 'events.package');
+  assert.ok(events.every(x => x.Package === 'github.com/KogenAI/kogen-loop/conformance'), 'events.package');
   assert.ok(!events.some(x => ['skip', 'fail'].includes(x.Action)), 'events.fail-or-skip');
   const count = (a, t) => events.filter(x => x.Action === a && x.Test === t).length;
   assert.equal(count('start', undefined), 1);
@@ -42,10 +42,10 @@ function report(r) {
 function equal(actual, expected) { assert.deepEqual(actual, expected, 'payload.exact'); }
 function control(kind) {
   const want = {a: true, b: 'x', c: 1};
-  const event = (Action, Output) => ({Package: 'kogen-loop/conformance', Action, ...(Action === 'start' ? {} : {Test: NAME}), ...(Output ? {Output} : {})});
+  const event = (Action, Output) => ({Package: 'github.com/KogenAI/kogen-loop/conformance', Action, ...(Action === 'start' ? {} : {Test: NAME}), ...(Output ? {Output} : {})});
   function synthetic(v) {
     const line = 'KSAFE ' + JSON.stringify(v) + '\n';
-    const es = [event('start'), event('run'), event('output', line.slice(0, 9)), event('output', line.slice(9)), event('pass'), {Package: 'kogen-loop/conformance', Action: 'pass'}];
+    const es = [event('start'), event('run'), event('output', line.slice(0, 9)), event('output', line.slice(9)), event('pass'), {Package: 'github.com/KogenAI/kogen-loop/conformance', Action: 'pass'}];
     return {status: 0, signal: null, error: null, stderr: '', stdout: es.map(x => JSON.stringify(x)).join('\n') + '\n'};
   }
   equal(report(synthetic(want)), want);

@@ -174,7 +174,7 @@ async function exercise(mode, c) {
     const results = [];
     for (const args of [['test','-race','./...'],['test','./conformance','-count=1'],['vet','./...'],['build','-o','/dev/null','./...']]) {
       const output = command('go',args);
-      results.push({command:'go '+args.join(' '),passed:true,suites:args[0] === 'test' ? ['conformance','provider','sys','tools'].filter(name => new RegExp('(?:ok|\\?)\\s+kogen-loop/'+name+'(?:\\s|$)').test(output)) : []});
+      results.push({command:'go '+args.join(' '),passed:true,suites:args[0] === 'test' ? ['conformance','provider','sys','tools'].filter(name => new RegExp('(?:ok|\\?)\\s+github.com/KogenAI/kogen-loop/'+name+'(?:\\s|$)').test(output)) : []});
     }
     return {results};
   }

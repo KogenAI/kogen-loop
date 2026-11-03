@@ -24,7 +24,7 @@ Then('README contains the L7 release boundary {string}', function (text) {
   assert.ok(fs.readFileSync('README.md', 'utf8').includes(text), 'missing release boundary');
 });
 When('I inspect the L7 public version', {timeout: 120000}, function () {
-  this.l7doc = spawnSync('go', ['doc', 'kogen-loop/loop.Version'], {encoding: 'utf8', timeout: 110000});
+  this.l7doc = spawnSync('go', ['doc', 'github.com/KogenAI/kogen-loop/loop.Version'], {encoding: 'utf8', timeout: 110000});
 });
 Then('the L7 public documentation contains {string}', function (text) {
   assert.equal(this.l7doc.status, 0, this.l7doc.stderr);

@@ -17,17 +17,17 @@ import (
 	"time"
 	_ "unsafe" // go:linkname
 
-	"kogen-loop/loop"
-	"kogen-loop/provider"
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/loop"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // shellStartHook is sys's test-only seam at the shell-start boundary ("enter", "starting",
 // "started"). It is nil outside the startup tests, which set it before a round starts and
 // clear it after the round has returned.
 //
-//go:linkname shellStartHook kogen-loop/sys.startHook
+//go:linkname shellStartHook github.com/KogenAI/kogen-loop/sys.startHook
 var shellStartHook func(stage string)
 
 // ---- owned process observation ----
@@ -368,7 +368,7 @@ func TestShellLifecycleCompatibility(t *testing.T) {
 // boundary while the context ends, then released. Both ends of the context must stop it.
 //
 // startupRound installs shellStartHook, the test seam linked to the process-wide
-// kogen-loop/sys.startHook. That hook fires for every in-process shell start in the test
+// github.com/KogenAI/kogen-loop/sys.startHook. That hook fires for every in-process shell start in the test
 // binary and counts "enter" stages, so another test's concurrent in-process shell would be
 // counted or held instead of the round's second call. The tests that call startupRound
 // therefore stay serial (no t.Parallel, in them or in their subtests): Go runs non-parallel

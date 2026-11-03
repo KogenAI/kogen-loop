@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 type result struct {

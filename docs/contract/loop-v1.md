@@ -4,7 +4,7 @@ Status: maintained local caller contract, adopted 26 October 2026 from external 
 
 kogen-loop has two caller surfaces with the same semantics:
 
-1. **Go library** (`kogen-loop/loop`, `kogen-loop/provider`, `kogen-loop/tools`, `kogen-loop/sys`). Hosts can call it in process; this tree makes no current Kogen consumer claim.
+1. **Go library** (`github.com/KogenAI/kogen-loop/loop`, `github.com/KogenAI/kogen-loop/provider`, `github.com/KogenAI/kogen-loop/tools`, `github.com/KogenAI/kogen-loop/sys`). Hosts can call it in process; this tree makes no current Kogen consumer claim.
 2. **Process protocol** (`kogen-loop run`, `kogen-loop capabilities`). Independent callers use it: one task in, JSON Lines events out, exit code.
 
 Neither surface knows Kogen's approval, Intent, baseline, verification, review, commit or checkpoint semantics.

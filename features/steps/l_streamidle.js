@@ -13,6 +13,6 @@ Then('stream idle test {string} passes for {string}', function (name, rule) {
   assert.ok(!r.error, context + 'spawn failure: ' + String(r.error));
   assert.equal(r.status, 0, context + 'command failed\n' + r.stdout + r.stderr);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const outcomes = events.filter(e => e.Package === 'kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action);
+  const outcomes = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action)).map(e => e.Action);
   assert.deepEqual(outcomes, ['pass'], context + 'test absent, skipped, failed or ran zero times; outcomes=' + JSON.stringify(outcomes) + '\n' + r.stdout + r.stderr);
 });

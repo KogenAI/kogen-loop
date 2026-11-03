@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"os"
 
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 type request struct {

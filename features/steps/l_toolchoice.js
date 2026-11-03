@@ -9,7 +9,7 @@ function passed(world, name) {
   const r = world.toolChoiceResult;
   assert.ifError(r.error);
   const events = r.stdout.split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const results = events.filter(e => e.Package === 'kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action));
+  const results = events.filter(e => e.Package === 'github.com/KogenAI/kogen-loop/provider' && e.Test === name && ['pass', 'fail', 'skip'].includes(e.Action));
   assert.deepEqual(results.map(e => e.Action), ['pass'], 'Required test did not run and pass: ' + name + '\n' + r.stdout + r.stderr);
   assert.equal(r.status, 0, r.stdout + r.stderr);
 }
