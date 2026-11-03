@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"kogen-loop/api"
 	"kogen-loop/sys"
 )
 
@@ -31,6 +32,22 @@ type Output struct {
 	// Rule is the rule id of a refused shell call, "" otherwise.
 	Rule string
 }
+
+// Classified is an Output with the category of a failed call, for the session's event log. The
+// category comes from the call and the tool's own failure path, never from the text; the
+// model sees only the Output.
+type Classified struct {
+	Text  string
+	Parts []any
+	Rule  string
+	// ErrorKind is the api.ToolError* kind of a well-formed call whose tool failed, "" otherwise.
+	ErrorKind string
+	// MalformedClass is the api.Malformed* class of a call the tool rejected as wrong, "" otherwise.
+	MalformedClass string
+}
+
+// Output is what the model receives of the call.
+func (c Classified) Output() Output { return Output{Text: c.Text, Parts: c.Parts, Rule: c.Rule} }
 
 // Typed reports whether the output is typed parts.
 func (o Output) Typed() bool { return o.Parts != nil }
@@ -99,8 +116,14 @@ func (t *Tools) Run(name string, args map[string]any) (Output, error) {
 // has its process group terminated and joined before the call returns ctx.Err(). Processes
 // a finished shell left behind are not touched here; the round's custody ends them.
 func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any) (Output, error) {
+	c, err := t.RunClassified(ctx, name, args)
+	return c.Output(), err
+}
+
+// RunClassified is RunContext with the category of a failed call.
+func (t *Tools) RunClassified(ctx context.Context, name string, args map[string]any) (Classified, error) {
 	if !slices.Contains(t.Enabled, name) {
-		return Output{Text: "error: unknown tool " + name}, nil
+		return unknownTool(name), nil
 	}
 	switch name {
 	case ViewImageTool:
@@ -108,21 +131,24 @@ func (t *Tools) RunContext(ctx context.Context, name string, args map[string]any
 	case ReadFileTool:
 		return t.readFile(args), nil
 	case WriteFileTool:
-		return Output{Text: t.writeFile(args)}, nil
+		return t.writeFile(args), nil
 	case ListFilesTool:
-		return Output{Text: t.listFiles(args)}, nil
+		return t.listFiles(args), nil
 	case SearchTextTool:
-		return Output{Text: t.searchText(args)}, nil
+		return t.searchText(args), nil
 	case ShellTool:
-		text, rule, err := t.shell(ctx, args)
-		return Output{Text: text, Rule: rule}, err
+		return t.shell(ctx, args)
 	case ProbeTool:
 		text, err := t.probe(args)
-		return Output{Text: text}, err
+		return Classified{Text: text}, err
 	case DocumentationTool:
-		return Output{Text: t.Documentation.Lookup(args)}, nil
+		return Classified{Text: t.Documentation.Lookup(args)}, nil
 	}
-	return Output{Text: "error: unknown tool " + name}, nil
+	return unknownTool(name), nil
+}
+
+func unknownTool(name string) Classified {
+	return Classified{Text: "error: unknown tool " + name, MalformedClass: api.MalformedUnknownTool}
 }
 
 // Call runs a function call of a response.
@@ -131,6 +157,11 @@ func (t *Tools) Call(c Call) (Output, error) { return t.CallContext(nil, c) }
 // CallContext runs a response call like RunContext.
 func (t *Tools) CallContext(ctx context.Context, c Call) (Output, error) {
 	return t.RunContext(ctx, c.Name, c.Args())
+}
+
+// CallClassified runs a response call like RunClassified.
+func (t *Tools) CallClassified(ctx context.Context, c Call) (Classified, error) {
+	return t.RunClassified(ctx, c.Name, c.Args())
 }
 
 // ---- arguments and paths ----
@@ -142,6 +173,17 @@ func stringArg(args map[string]any, key string) (string, string) {
 	}
 	return "", "error: argument " + key + " must be a string"
 }
+
+// badArg is the refused call of a string argument that is absent or not a string.
+func badArg(args map[string]any, key, msg string) Classified {
+	class := api.MalformedWrongArgumentType
+	if _, ok := args[key]; !ok {
+		class = api.MalformedMissingArgument
+	}
+	return Classified{Text: msg, MalformedClass: class}
+}
+
+func failed(kind, text string) Classified { return Classified{Text: text, ErrorKind: kind} }
 
 func optionalPath(args map[string]any) string {
 	if p, ok := args["path"].(string); ok {
@@ -219,23 +261,23 @@ func isErrno(err error, want syscall.Errno) bool {
 
 // ---- the tools ----
 
-func (t *Tools) readFile(args map[string]any) Output {
+func (t *Tools) readFile(args map[string]any) Classified {
 	path, msg := stringArg(args, "path")
 	if msg != "" {
-		return Output{Text: msg}
+		return badArg(args, "path", msg)
 	}
 	data, err := t.readContained(path)
 	switch {
 	case err == nil:
-		return Output{Text: numbered(string(data), args["start_line"], args["end_line"])}
+		return Classified{Text: numbered(string(data), args["start_line"], args["end_line"])}
 	case refusal(path, err) != "":
-		return Output{Text: refusal(path, err)}
+		return failed(api.ToolErrorOutsideRoot, refusal(path, err))
 	case isErrno(err, syscall.ENOENT):
-		return Output{Text: "error: " + path + " does not exist"}
+		return failed(api.ToolErrorNotFound, "error: "+path+" does not exist")
 	case isErrno(err, syscall.EISDIR):
-		return Output{Text: "error: " + path + " is a folder; use list_files"}
+		return failed(api.ToolErrorIsFolder, "error: "+path+" is a folder; use list_files")
 	}
-	return Output{Text: "error: " + path + ": " + reason(err)}
+	return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 }
 
 // numbered is the lines from..to of text (1-based, inclusive) as `<n>\t<line>` joined by
@@ -289,26 +331,26 @@ func integerValue(v any) (int64, bool) {
 	return 0, false
 }
 
-func (t *Tools) writeFile(args map[string]any) string {
+func (t *Tools) writeFile(args map[string]any) Classified {
 	path, msg := stringArg(args, "path")
 	if msg != "" {
-		return msg
+		return badArg(args, "path", msg)
 	}
 	content, msg := stringArg(args, "content")
 	if msg != "" {
-		return msg
+		return badArg(args, "content", msg)
 	}
 	abs, rel := t.resolve(path)
 	if slices.Contains(t.Protected, rel) {
-		return "refused: " + rel + " is part of the approved acceptance baseline"
+		return failed(api.ToolErrorProtected, "refused: "+rel+" is part of the approved acceptance baseline")
 	}
 	if err := mkdirAll(filepath.Dir(abs)); err != nil {
-		return "error: " + path + ": " + reason(err)
+		return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 	}
 	if err := writeFile(abs, content); err != nil {
-		return "error: " + path + ": " + reason(err)
+		return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 	}
-	return "ok"
+	return Classified{Text: "ok"}
 }
 
 // errBadArg is what a path with a NUL byte is: not a file name at all.
@@ -464,19 +506,19 @@ func (t *Tools) session() *sys.Session {
 
 // pathspec is the Git path restriction for a path argument: none for the root itself. A path
 // that leaves the root, by name, home, `..` or a symlink, is refused with the error text.
-func (t *Tools) pathspec(args map[string]any) ([]string, string) {
+func (t *Tools) pathspec(args map[string]any) ([]string, Classified) {
 	path := cString(optionalPath(args)) // Git receives an argument only up to its first NUL
 	// Git top-anchored pathspecs are relative to the Git worktree, which can be
 	// an ancestor of Tools.Root. They must not bypass root containment.
 	if strings.HasPrefix(path, ":/") || strings.HasPrefix(path, ":(") && strings.Contains(strings.SplitN(path, ")", 2)[0], "top") {
-		return nil, refusal(path, errOutside)
+		return nil, failed(api.ToolErrorOutsideRoot, refusal(path, errOutside))
 	}
 	physical, err := t.contain(path, true)
 	if err != nil {
 		if text := refusal(path, err); text != "" {
-			return nil, text
+			return nil, failed(api.ToolErrorOutsideRoot, text)
 		}
-		return nil, "error: " + path + ": " + reason(err)
+		return nil, failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
 	}
 	// Git sees the path as written when that stays inside; the resolved one otherwise.
 	_, rel := t.resolve(path)
@@ -487,9 +529,9 @@ func (t *Tools) pathspec(args map[string]any) ([]string, string) {
 		rel = physical
 	}
 	if rel == "" || rel == "." {
-		return nil, ""
+		return nil, Classified{}
 	}
-	return []string{cString(rel)}, ""
+	return []string{cString(rel)}, Classified{}
 }
 
 // cString is s up to its first NUL byte: what a program receives of an argument.
@@ -505,44 +547,44 @@ func gitFailure(res GitResult) string {
 	return "error: " + strings.TrimSpace(res.Stdout+res.Stderr)
 }
 
-func (t *Tools) listFiles(args map[string]any) string {
-	spec, text := t.pathspec(args)
-	if text != "" {
-		return text
+func (t *Tools) listFiles(args map[string]any) Classified {
+	spec, refused := t.pathspec(args)
+	if refused.Text != "" {
+		return refused
 	}
 	argv := append([]string{"ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate", "--"}, spec...)
 	res, err := t.repo().Run(argv...)
 	switch {
 	case err != nil:
-		return "error: " + err.Error()
+		return failed(api.ToolErrorGit, "error: "+err.Error())
 	case res.Status != 0:
-		return gitFailure(res)
+		return failed(api.ToolErrorGit, gitFailure(res))
 	case res.Stdout == "":
-		return "(no files)"
+		return Classified{Text: "(no files)"}
 	}
-	return trimTrailing(res.Stdout)
+	return Classified{Text: trimTrailing(res.Stdout)}
 }
 
-func (t *Tools) searchText(args map[string]any) string {
+func (t *Tools) searchText(args map[string]any) Classified {
 	pattern, msg := stringArg(args, "pattern")
 	if msg != "" {
-		return msg
+		return badArg(args, "pattern", msg)
 	}
-	spec, text := t.pathspec(args)
-	if text != "" {
-		return text
+	spec, refused := t.pathspec(args)
+	if refused.Text != "" {
+		return refused
 	}
 	argv := append([]string{"grep", "-n", "-I", "-E", "--untracked", "-e", cString(pattern), "--"}, spec...)
 	res, err := t.repo().Run(argv...)
 	switch {
 	case err != nil:
-		return "error: " + err.Error()
+		return failed(api.ToolErrorGit, "error: "+err.Error())
 	case res.Status == 0:
-		return trimTrailing(res.Stdout)
+		return Classified{Text: trimTrailing(res.Stdout)}
 	case res.Status == 1:
-		return "(no matches)"
+		return Classified{Text: "(no matches)"}
 	}
-	return gitFailure(res)
+	return failed(api.ToolErrorGit, gitFailure(res))
 }
 
 type shellJob struct {
@@ -591,20 +633,24 @@ func (t *Tools) CancelShellHandle(id string) {
 		j.cmd.Stop(j.cancel)
 	}
 }
-func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string, error) {
+func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, error) {
 	command, hasCommand := args["command"]
 	cmd, commandIsString := command.(string)
 	handle, _ := args["handle"].(string)
 	usableCommand := commandIsString && strings.TrimSpace(cmd) != ""
 	hasHandle := strings.TrimSpace(handle) != ""
 	if !hasHandle && hasCommand && !commandIsString {
-		return "error: argument command must be a string", "", nil
+		return Classified{Text: "error: argument command must be a string", MalformedClass: api.MalformedWrongArgumentType}, nil
 	}
 	if usableCommand == hasHandle {
-		return "error: supply exactly one of command or handle", "", nil
+		class := api.MalformedMissingArgument
+		if usableCommand {
+			class = api.MalformedConflictingArguments
+		}
+		return Classified{Text: "error: supply exactly one of command or handle", MalformedClass: class}, nil
 	}
 	if ctx != nil && ctx.Err() != nil {
-		return "", "", ctx.Err()
+		return Classified{}, ctx.Err()
 	}
 	r := t.registry()
 	var j *shellJob
@@ -615,12 +661,12 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 		j = r.jobs[id]
 		r.mu.Unlock()
 		if j == nil {
-			return "error: unknown shell handle", "", nil
+			return failed(api.ToolErrorUnknownShellHandle, "error: unknown shell handle"), nil
 		}
 	} else {
 		var token [16]byte
 		if _, err := crand.Read(token[:]); err != nil {
-			return "", "", err
+			return Classified{}, err
 		}
 		id = hex.EncodeToString(token[:])
 		jobctx, cancel := context.WithCancel(context.Background())
@@ -652,21 +698,21 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 		j.cancel()
 		<-j.cmd.Done()
 		if t.Session != nil && t.Session.Err() != nil {
-			return "", "", t.Session.Err()
+			return Classified{}, t.Session.Err()
 		}
-		return "", "", ctx.Err()
+		return Classified{}, ctx.Err()
 	}
 	if ctx != nil && ctx.Err() != nil {
 		j.cancel()
 		<-j.cmd.Done()
 		if t.Session != nil && t.Session.Err() != nil {
-			return "", "", t.Session.Err()
+			return Classified{}, t.Session.Err()
 		}
-		return "", "", ctx.Err()
+		return Classified{}, ctx.Err()
 	}
 	res, completed, err := j.cmd.Snapshot()
 	if err != nil {
-		return "", "", err
+		return Classified{}, err
 	}
 	if !hasHandle && completed {
 		r.mu.Lock()
@@ -674,9 +720,9 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 		r.mu.Unlock()
 		j.cancel()
 		if res.Rule != "" {
-			return res.Output, res.Rule, nil
+			return Classified{Text: res.Output, Rule: res.Rule, ErrorKind: api.ToolErrorForeignKill}, nil
 		}
-		return "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output, "", nil
+		return Classified{Text: "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output}, nil
 	}
 	output := res.Output
 	if !utf8.ValidString(output) {
@@ -704,7 +750,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (string, string,
 		envelope["output"] = cutText(output, lo, lo/4)
 		raw, _ = json.Marshal(envelope)
 	}
-	return string(raw), "", nil
+	return Classified{Text: string(raw)}, nil
 }
 
 func (t *Tools) probe(args map[string]any) (string, error) {

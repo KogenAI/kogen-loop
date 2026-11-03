@@ -283,6 +283,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	var usages []api.Usage
 	cutCalls := map[string]bool{}
 	rules := map[string]string{}
+	categories := map[string]map[string]any{}
 	s.requests = 0
 	rd := Round{
 		Owner: "loop", Role: s.cfg.Role, Instructions: s.instructions, Definitions: s.defs,
@@ -315,14 +316,20 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 		// The engine cuts what it runs itself; the session runs the call here to learn
 		// whether the cut applied, which the engine's order does not report.
 		HandleCall: func(ctx context.Context, call tools.Call) (Handled, error) {
-			out, err := s.tools.CallContext(ctx, call)
+			classified, err := s.tools.CallClassified(ctx, call)
 			if err != nil {
 				return Handled{}, err
 			}
+			out := classified.Output()
 			cut := out.Cut()
 			cutCalls[fmt.Sprint(call.CallID())] = cut.Text != out.Text
 			if out.Rule != "" {
 				rules[fmt.Sprint(call.CallID())] = out.Rule
+			}
+			if classified.ErrorKind != "" {
+				categories[fmt.Sprint(call.CallID())] = map[string]any{"error_kind": classified.ErrorKind}
+			} else if classified.MalformedClass != "" {
+				categories[fmt.Sprint(call.CallID())] = map[string]any{"malformed_class": classified.MalformedClass}
 			}
 			return Handled{Handled: true, Output: cut}, nil
 		},
@@ -341,6 +348,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			}
 			if rule := rules[fmt.Sprint(call.CallID())]; rule != "" {
 				fields["rule"] = rule
+			}
+			for k, v := range categories[fmt.Sprint(call.CallID())] {
+				fields[k] = v
 			}
 			s.emit(api.EventToolResult, fields)
 			return nil

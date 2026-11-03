@@ -307,12 +307,41 @@ Every line has `protocol`, `seq` (1-based, gapless), `time` (RFC 3339 UTC) and `
 | `response` | `n`, `response_id`, `usage` (`api.Usage`) |
 | `context.condensed` | `n` (the request it precedes), `requests` (summarization requests), `condensed_exchanges`, `kept_exchanges`, `bytes_before`, `bytes_after`, `limit`, `summary_bytes`, `usage` (`api.Usage` of the summarization requests; unknown stays null) |
 | `tool.call` | `call_id`, `name`, `arguments_sha256` |
-| `tool.result` | `call_id`, `name`, `result_sha256`, `bytes`, `cut` (bool), and `rule` only for a refused shell call. `bytes` and `result_sha256` describe what the model received, after the cut. |
+| `tool.result` | `call_id`, `name`, `result_sha256`, `bytes`, `cut` (bool), `rule` only for a refused shell call, `error_kind` only for a tool error and `malformed_class` only for a malformed call (see [Tool error kinds and malformed call classes](#tool-error-kinds-and-malformed-call-classes)). `bytes` and `result_sha256` describe what the model received, after the cut. |
 | `round.ended` | `ending` (`terminal`/`no_call`), `terminal_tool`, `claim` (terminal arguments or final text — `output_text` and `refusal` parts in content order, newline-joined — bounded 16384 bytes; **a claim, not proof**), `requests`, `usage` (round total) |
 | `error` | `class`, `reason`, `detail` (same shape as `sys.Error`) |
 | `session.ended` | `status` (`ended`/`failed`/`interrupted`), `exit` |
 
 `session.ended` is always the last line. Callers must ignore unknown fields and unknown event types inside the same major version.
+
+### Tool error kinds and malformed call classes
+
+A `tool.result` is an error when its delivered text starts with `error: ` or `refused: `. It then carries exactly one of `error_kind` (a well-formed call whose tool failed) or `malformed_class` (the call itself is wrong); every other result carries neither. Both are strings from the fixed vocabularies below (`api.ToolError*`, `api.Malformed*`), never the error text or the arguments, and nothing the model receives changes. Terminal calls have no `tool.result`; `exit status: N` texts, shell envelopes, `(no matches)`, `(no files)`, typed `view_image` parts and `documentation` results are not errors; `probe` has no category.
+
+`malformed_class`:
+
+| class | condition |
+|---|---|
+| `unknown_tool` | the name is not an enabled tool (unknown, or known but not enabled) |
+| `missing_argument` | a required string argument is absent: `path` of `read_file`, `write_file` and `view_image`, `content` of `write_file`, `pattern` of `search_text`; a `shell` call with neither a non-blank string `command` nor a non-blank string `handle` |
+| `wrong_argument_type` | that argument is present but not a string (JSON `null` included); a `shell` `command` that is not a string without a non-blank `handle` |
+| `conflicting_arguments` | a `shell` call with both a non-blank string `command` and a non-blank string `handle` |
+
+Where a tool checks several arguments the class follows the one the text names (`write_file` checks `path` before `content`).
+
+`error_kind`:
+
+| kind | condition |
+|---|---|
+| `not_found` | `read_file` of a path that does not exist |
+| `is_folder` | `read_file` of a folder |
+| `outside_root` | root containment refused the path of `read_file`, `view_image`, `list_files` or `search_text` (`~`, absolute outside the root, `..` escape, symlink leaving the root, top-anchored Git pathspec) |
+| `file_error` | any other file-system failure of `read_file`, `write_file`, or resolving the path of `list_files` or `search_text` |
+| `protected` | `write_file` refused a protected path |
+| `git_failed` | the Git command of `list_files` or `search_text` failed or could not start |
+| `unknown_shell_handle` | a `shell` retrieval with an unknown or expired handle |
+| `foreign_kill` | the foreign-kill filter refused a `shell` command (`rule` stays in the event) |
+| `invalid_image` | `view_image` of a string path inside the root that is missing, not a regular file, outside the byte limits or not a supported PNG |
 
 ### Usage (`api.Usage`)
 
