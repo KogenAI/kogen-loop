@@ -419,9 +419,40 @@ func (s *Session) Retire(groups []int) {
 // group has no member. A group that is already empty costs one failed kill (ESRCH).
 func sweepGroup(pgid int) {
 	Terminate([]int{pgid})
-	for i := 0; i < 50 && syscall.Kill(-pgid, 0) != syscall.ESRCH; i++ {
-		time.Sleep(20 * time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	var b backoff
+	for syscall.Kill(-pgid, 0) != syscall.ESRCH {
+		if !b.sleep(20*time.Millisecond, deadline) {
+			return
+		}
 	}
+}
+
+// backoff is the growing sleep step of a wait: 2 ms, doubling, never above the cap.
+type backoff struct{ step time.Duration }
+
+// sleep waits one step, capped at max and shortened so it does not run past deadline
+// (the zero time means no deadline). It reports false when the deadline has passed.
+func (b *backoff) sleep(max time.Duration, deadline time.Time) bool {
+	if b.step == 0 {
+		b.step = 2 * time.Millisecond
+	}
+	d := b.step
+	if d > max {
+		d = max
+	}
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		if d > remaining {
+			d = remaining
+		}
+	}
+	time.Sleep(d)
+	b.step = min(2*b.step, max)
+	return true
 }
 
 // commandLifecycle arbitrates the command's completion against a timer callback
@@ -548,8 +579,10 @@ func Terminate(groups []int) {
 			alive = append(alive, g)
 		}
 	}
-	for i := 0; i < 50 && len(alive) > 0; i++ {
-		time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	var term backoff
+	for len(alive) > 0 {
+		// The first pass checks right after the signal; later ones follow a sleep.
 		var still []int
 		for _, g := range alive {
 			if syscall.Kill(-g, 0) == nil {
@@ -557,12 +590,16 @@ func Terminate(groups []int) {
 			}
 		}
 		alive = still
+		if len(alive) == 0 || !term.sleep(100*time.Millisecond, deadline) {
+			break
+		}
 	}
 	for _, g := range alive {
 		syscall.Kill(-g, syscall.SIGKILL)
 	}
 	// Signal delivery is asynchronous. Do not hand custody back while a group
 	// member can still run, even if its leader has already been reaped.
+	var kill backoff
 	for len(alive) > 0 {
 		var still []int
 		for _, g := range alive {
@@ -572,7 +609,7 @@ func Terminate(groups []int) {
 		}
 		alive = still
 		if len(alive) > 0 {
-			time.Sleep(20 * time.Millisecond)
+			kill.sleep(20*time.Millisecond, time.Time{})
 		}
 	}
 }
