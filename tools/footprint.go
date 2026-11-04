@@ -84,7 +84,11 @@ func (t *Tools) footprint(name string, args map[string]any) footprint.Footprint 
 		if _, isString := args["content"].(string); !ok || !isString || strings.ContainsRune(path, 0) {
 			return barrier
 		}
-		abs, err := filepath.Abs(expand(path, t.Root))
+		resolved, _, err := t.resolveWrite(path)
+		if err != nil {
+			return barrier
+		}
+		abs, err := filepath.Abs(resolved)
 		if err != nil {
 			return barrier
 		}

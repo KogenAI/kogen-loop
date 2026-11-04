@@ -241,6 +241,134 @@ func (t *Tools) resolve(path string) (abs, rel string) {
 	return abs, relativeTo(abs, t.Root)
 }
 
+// resolveWrite is resolve for write_file: a link right before a ".." is followed first, so
+// the ".." steps up from the link's target as the file system does. The rest is taken as
+// written and a component that does not exist is removed by a ".." after it, as Clean does.
+// A link before a ".." must resolve to an existing directory, or the error is the reason.
+func (t *Tools) resolveWrite(path string) (abs, rel string, err error) {
+	if strings.ContainsRune(path, 0) || !slices.Contains(splitPath(path), "..") {
+		abs, rel = t.resolve(path)
+		return abs, rel, nil
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = home + path[1:]
+		}
+	}
+	rooted := filepath.IsAbs(path)
+	if !rooted {
+		root := filepath.Clean(t.Root)
+		rooted = filepath.IsAbs(root)
+		path = root + "/" + path
+	}
+	var stack []string
+	for _, c := range splitPath(path) {
+		if c != ".." {
+			stack = append(stack, c)
+			continue
+		}
+		if len(stack) == 0 || stack[len(stack)-1] == ".." {
+			if !rooted {
+				stack = append(stack, c)
+			}
+			continue
+		}
+		top := strings.Join(stack, "/")
+		if rooted {
+			top = "/" + top
+		}
+		if fi, err := os.Lstat(top); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			if top, err = filepath.Abs(top); err != nil {
+				return "", "", err
+			}
+			if stack, err = resolveLinkDir(top); err != nil {
+				return "", "", err
+			}
+			rooted = true
+		}
+		stack = stack[:len(stack)-1]
+	}
+	abs = strings.Join(stack, "/")
+	if rooted {
+		abs = "/" + abs
+	} else if abs == "" {
+		abs = "."
+	}
+	root := t.Root
+	if rooted && !filepath.IsAbs(root) {
+		if root, err = filepath.Abs(root); err != nil {
+			return "", "", err
+		}
+	}
+	rel = relativeTo(abs, root)
+	// A followed link leaves a path without links, which names the root without its links.
+	if filepath.IsAbs(rel) {
+		if canonical, err := filepath.EvalSymlinks(root); err == nil {
+			rel = relativeTo(abs, canonical)
+		}
+	}
+	return abs, rel, nil
+}
+
+// maxWriteLinks bounds the links followed to resolve one link before a "..".
+const maxWriteLinks = 40
+
+// resolveLinkDir is the components of the existing directory the link at the absolute path
+// link leads to, without links: every component is resolved from "/", so a ".." in a target
+// steps up from where the folders holding the link really are. A target or component that
+// is missing, a loop or more than maxWriteLinks links, and a target that is not a directory
+// are errors.
+func resolveLinkDir(link string) ([]string, error) {
+	var stack []string
+	pending := splitPath(link)
+	links := 0
+	for len(pending) > 0 {
+		c := pending[0]
+		pending = pending[1:]
+		if c == ".." {
+			if len(stack) > 0 {
+				if err := mustBeDir(stack); err != nil {
+					return nil, err
+				}
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+		cand := "/" + strings.Join(append(slices.Clone(stack), c), "/")
+		fi, err := os.Lstat(cand)
+		if err != nil {
+			return nil, err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			stack = append(stack, c)
+			continue
+		}
+		if links++; links > maxWriteLinks {
+			return nil, syscall.ELOOP
+		}
+		target, err := os.Readlink(cand)
+		if err != nil {
+			return nil, err
+		}
+		if filepath.IsAbs(target) {
+			stack = nil
+		}
+		pending = append(splitPath(target), pending...)
+	}
+	return stack, mustBeDir(stack)
+}
+
+func mustBeDir(stack []string) error {
+	fi, err := os.Stat("/" + strings.Join(stack, "/"))
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return syscall.ENOTDIR
+	}
+	return nil
+}
+
 // errno names, as the Erlang file functions report them.
 var errnoNames = map[syscall.Errno]string{
 	syscall.EPERM: "eperm", syscall.ENOENT: "enoent", syscall.EIO: "eio", syscall.EBADF: "ebadf",
@@ -405,7 +533,10 @@ func (t *Tools) writeFile(args map[string]any) Classified {
 	if msg != "" {
 		return badArg(args, "content", msg)
 	}
-	abs, rel := t.resolve(path)
+	abs, rel, err := t.resolveWrite(path)
+	if err != nil {
+		return failed(api.ToolErrorFile, "error: "+path+": "+reason(err))
+	}
 	if slices.Contains(t.Protected, rel) {
 		return failed(api.ToolErrorProtected, "refused: "+rel+" is part of the approved acceptance baseline")
 	}
