@@ -48,6 +48,9 @@ type Classified struct {
 	MalformedClass string
 	// ShellWait is the bounded wait of a shell call that reached it, nil for every other call.
 	ShellWait *ShellWait
+	// ExitStatus is the completed command's status (128+signal when killed) of a shell call whose
+	// text reports one, nil for every other call, including refused ones.
+	ExitStatus *int
 }
 
 // ShellWait is the bounded wait of one shell call.
@@ -1066,7 +1069,8 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		if res.Rule != "" {
 			return Classified{Text: res.Output, Rule: res.Rule, ErrorKind: api.ToolErrorForeignKill, ShellWait: record}, nil
 		}
-		return Classified{Text: "exit status: " + strconv.Itoa(res.Status) + "\n" + res.Output, ShellWait: record}, nil
+		status := res.Status
+		return Classified{Text: "exit status: " + strconv.Itoa(status) + "\n" + res.Output, ShellWait: record, ExitStatus: &status}, nil
 	}
 	output := res.Output
 	if !utf8.ValidString(output) {
@@ -1076,6 +1080,11 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 	if completed {
 		envelope["status"] = "completed"
 		envelope["exit_status"] = res.Status
+	}
+	var exitStatus *int
+	if completed && res.Rule == "" {
+		status := res.Status
+		exitStatus = &status
 	}
 	raw, _ := json.Marshal(envelope)
 	if len(raw) > maxResult {
@@ -1094,7 +1103,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		envelope["output"] = cutText(output, lo, lo/4)
 		raw, _ = json.Marshal(envelope)
 	}
-	return Classified{Text: string(raw), ShellWait: record}, nil
+	return Classified{Text: string(raw), ShellWait: record, ExitStatus: exitStatus}, nil
 }
 
 func (t *Tools) probe(args map[string]any) (string, error) {

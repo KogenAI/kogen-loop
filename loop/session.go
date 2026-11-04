@@ -350,6 +350,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	rules := map[string]string{}
 	categories := map[string]map[string]any{}
 	shellWaits := map[string]map[string]any{}
+	exitStatuses := map[string]int{}
 	reads := map[string]readLines{}
 	s.requests = 0
 	rd := Round{
@@ -404,6 +405,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			if w := classified.ShellWait; w != nil {
 				shellWaits[fmt.Sprint(call.CallID())] = shellWaitFields(w)
 			}
+			if classified.ExitStatus != nil {
+				exitStatuses[fmt.Sprint(call.CallID())] = *classified.ExitStatus
+			}
 			return Handled{Handled: true, Output: cut}, nil
 		},
 		AfterCall: func(ctx context.Context, call tools.Call, out tools.Output, terminal bool, in []any) error {
@@ -427,6 +431,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			}
 			if w := shellWaits[fmt.Sprint(call.CallID())]; w != nil {
 				fields["shell_wait"] = w
+			}
+			if n, ok := exitStatuses[fmt.Sprint(call.CallID())]; ok {
+				fields["exit_status"] = n
 			}
 			if r, ok := reads[fmt.Sprint(call.CallID())]; ok {
 				var recovers []map[string]any
