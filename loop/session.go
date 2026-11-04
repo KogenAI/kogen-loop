@@ -85,16 +85,17 @@ type Session struct {
 	pending  *terminalRef // the terminal call of the last round, if it ended with one
 	seq      int
 	requests int       // requests started in the current round (read by Attempt)
-	cutReads []cutRead // cut read_file results of this Session, in tool.result order; memory only
+	cutReads []cutRead // cut read_file results of this Session, in tool.result order; saved in session.json as cut_reads
 }
 
 // cutRead is a cut read_file result whose tool.result event was emitted: the file it read
-// (root-relative cleaned path, never emitted) and the line numbers its cut omitted.
+// (root-relative cleaned path, never emitted) and the line numbers its cut omitted. It is
+// saved in session.json as cut_reads and restored by ResumeSession.
 type cutRead struct {
-	callID any
-	file   string
-	from   int
-	to     int
+	CallID any    `json:"call_id"`
+	File   string `json:"file"`
+	From   int    `json:"from"`
+	To     int    `json:"to"`
 }
 
 // readLines describes a numbered read_file result: its file, its raw first and last line
@@ -122,7 +123,11 @@ func (s *Session) readLinesOf(call tools.Call, raw string) (readLines, bool) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(s.cfg.Root, path)
 	}
-	r := readLines{file: filepath.Clean(path), first: first, last: last}
+	path = filepath.Clean(path)
+	if rel, err := filepath.Rel(s.cfg.Root, path); err == nil {
+		path = rel
+	}
+	r := readLines{file: path, first: first, last: last}
 	if from, to, cut := tools.CutOmitted(raw); cut {
 		// Each line counts with the newline that ends it: the first omitted byte lies in the
 		// line after the newlines before it, the last omitted byte in the line after the
@@ -157,6 +162,7 @@ type transcript struct {
 	DefinitionsSHA256  string       `json:"definitions_sha256"`
 	Terminal           *terminalRef `json:"terminal"`
 	Input              []any        `json:"input"`
+	CutReads           []cutRead    `json:"cut_reads,omitempty"`
 }
 
 const transcriptName = "session.json"
@@ -223,7 +229,7 @@ func ResumeSession(cfg SessionConfig) (*Session, error) {
 	case t.DefinitionsSHA256 != definitionsDigest(s.defs):
 		return nil, mismatch("the transcript was written with other tool definitions")
 	}
-	s.id, s.input, s.pending = t.SessionID, t.Input, t.Terminal
+	s.id, s.input, s.pending, s.cutReads = t.SessionID, t.Input, t.Terminal, t.CutReads
 	s.direct.CacheID = s.id
 	return s, nil
 }
@@ -425,11 +431,11 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			if r, ok := reads[fmt.Sprint(call.CallID())]; ok {
 				var recovers []map[string]any
 				for _, c := range s.cutReads {
-					if c.file != r.file {
+					if c.File != r.file {
 						continue
 					}
-					if n := r.delivered(c.from, c.to); n > 0 {
-						recovers = append(recovers, map[string]any{"call_id": c.callID, "lines": n})
+					if n := r.delivered(c.From, c.To); n > 0 {
+						recovers = append(recovers, map[string]any{"call_id": c.CallID, "lines": n})
 					}
 				}
 				if recovers != nil {
@@ -437,7 +443,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 				}
 				if r.omitted != nil {
 					fields["omitted_lines"] = []int{r.omitted[0], r.omitted[1]}
-					s.cutReads = append(s.cutReads, cutRead{callID: call.CallID(), file: r.file, from: r.omitted[0], to: r.omitted[1]})
+					s.cutReads = append(s.cutReads, cutRead{CallID: call.CallID(), File: r.file, From: r.omitted[0], To: r.omitted[1]})
 				}
 			}
 			s.emit(api.EventToolResult, fields)
@@ -531,7 +537,7 @@ func (s *Session) persist(input []any, pending *terminalRef) error {
 	t := transcript{
 		Protocol: api.Protocol, SessionID: s.id, Role: role,
 		InstructionsSHA256: digest(s.instructions), DefinitionsSHA256: definitionsDigest(s.defs),
-		Terminal: pending, Input: input,
+		Terminal: pending, Input: input, CutReads: s.cutReads,
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

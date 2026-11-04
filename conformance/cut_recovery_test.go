@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -201,5 +202,154 @@ func TestSessionRecoversAcrossRoundsAndCutsOnlyReadFile(t *testing.T) {
 	}
 	if got := field(results["later"], "recovers"); got != `[{"call_id":"cut","lines":2}]` {
 		t.Errorf("a read in a later round recovers %q", got)
+	}
+}
+
+// resumedRound runs one round of a session in Dir (resuming it unless first) and returns the
+// tool.result fields by call id.
+func resumedRound(t *testing.T, w *world, dir string, first bool, exchanges []exchange) map[string]map[string]any {
+	t.Helper()
+	f := newFakeProvider(t, exchanges)
+	var events []api.Event
+	cfg := sessionConfig(w, f, &events)
+	cfg.Dir = dir
+	var s *loop.Session
+	var err error
+	if first {
+		s, err = loop.NewSession(cfg)
+	} else {
+		s, err = loop.ResumeSession(cfg)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.Round(context.Background(), "go"); err != nil || res.Ending != loop.EndTerminal {
+		t.Fatalf("%v %v", res, err)
+	}
+	results := map[string]map[string]any{}
+	for _, e := range events {
+		if e.Type == api.EventToolResult {
+			results[fmt.Sprint(e.Fields["call_id"])] = e.Fields
+		}
+	}
+	return results
+}
+
+func savedCutReads(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	return string(m["cut_reads"])
+}
+
+func readThenFinish(id string, args map[string]any, end string) []exchange {
+	return []exchange{
+		{Items: []map[string]any{call(id, "read_file", args)}},
+		{Items: []map[string]any{call(end, "finish", map[string]any{"summary": "x"})}},
+	}
+}
+
+func TestResumedSessionRecoversLinesAnEarlierRoundCutOmitted(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t).signIn().seed(map[string]string{
+		"big.txt": lineFile(600, func(i int) string { return fmt.Sprintf("big row %d %s secret-big-%d", i, strings.Repeat("b", 30), i) }),
+		"other.txt": lineFile(600, func(i int) string {
+			return fmt.Sprintf("other row %d %s secret-other-%d", i, strings.Repeat("o", 28), i)
+		}),
+	})
+	dir := filepath.Join(t.TempDir(), "session")
+	resumedRound(t, w, dir, true, readThenFinish("c-cut", map[string]any{"path": "./big.txt"}, "e1"))
+	const one = `{"call_id":"c-cut","file":"big.txt","from":70,"to":403}`
+	if got := savedCutReads(t, dir); got != "["+one+"]" {
+		t.Fatalf("saved cut_reads %s", got)
+	}
+
+	r := resumedRound(t, w, dir, false, []exchange{
+		{Items: []map[string]any{
+			call("straddle", "read_file", map[string]any{"path": filepath.Join(w.root, "big.txt"), "start_line": 400, "end_line": 405}),
+			call("other", "read_file", map[string]any{"path": "other.txt", "start_line": 100, "end_line": 109}),
+			call("before", "read_file", map[string]any{"path": "big.txt", "start_line": 60, "end_line": 69}),
+			call("after", "read_file", map[string]any{"path": "big.txt", "start_line": 404, "end_line": 410}),
+			call("cut2", "read_file", map[string]any{"path": "big.txt"}),
+		}},
+		{Items: []map[string]any{call("e2", "finish", map[string]any{"summary": "x"})}},
+	})
+	want := map[string]string{"straddle": `[{"call_id":"c-cut","lines":4}]`}
+	for _, id := range []string{"straddle", "other", "before", "after", "cut2"} {
+		if got := field(r[id], "recovers"); got != want[id] {
+			t.Errorf("%s: recovers %q, want %q", id, got, want[id])
+		}
+	}
+	const two = `{"call_id":"cut2","file":"big.txt","from":70,"to":403}`
+	if got := savedCutReads(t, dir); got != "["+one+","+two+"]" {
+		t.Fatalf("saved cut_reads after resume %s", got)
+	}
+
+	r = resumedRound(t, w, dir, false, readThenFinish("both", map[string]any{"path": "big.txt", "start_line": 400, "end_line": 405}, "e3"))
+	if got := field(r["both"], "recovers"); got != `[{"call_id":"c-cut","lines":4},{"call_id":"cut2","lines":4}]` {
+		t.Errorf("recovers %q", got)
+	}
+}
+
+func TestResumedSessionWithoutSavedRecordsRecoversNothing(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t).signIn().seed(map[string]string{
+		"big.txt": lineFile(600, func(i int) string { return fmt.Sprintf("big row %d %s secret-big-%d", i, strings.Repeat("b", 30), i) }),
+		"s.txt":   "one\n",
+	})
+	dir := filepath.Join(t.TempDir(), "session")
+	resumedRound(t, w, dir, true, readThenFinish("c-cut", map[string]any{"path": "big.txt"}, "e1"))
+	path := filepath.Join(dir, "session.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "cut_reads")
+	old, _ := json.Marshal(m)
+	if err := os.WriteFile(path, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := resumedRound(t, w, dir, false, readThenFinish("c-straddle", map[string]any{"path": "big.txt", "start_line": 400, "end_line": 405}, "e2"))
+	if got := field(r["c-straddle"], "recovers"); got != "" {
+		t.Errorf("recovers %q", got)
+	}
+	if got := savedCutReads(t, dir); got != "" {
+		t.Errorf("a session without records saved cut_reads %s", got)
+	}
+}
+
+func TestResumeRefusesUndecodableCutReads(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t).signIn()
+	dir := filepath.Join(t.TempDir(), "session")
+	resumedRound(t, w, dir, true, []exchange{{Items: []map[string]any{call("end", "finish", map[string]any{"summary": "x"})}}})
+	path := filepath.Join(dir, "session.json")
+	data, _ := os.ReadFile(path)
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["cut_reads"] = json.RawMessage(`"nope"`)
+	bad, _ := json.Marshal(m)
+	if err := os.WriteFile(path, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeProvider(t, nil)
+	var events []api.Event
+	cfg := sessionConfig(w, f, &events)
+	cfg.Dir = dir
+	_, err := loop.ResumeSession(cfg)
+	if err == nil || !strings.Contains(err.Error(), "the session transcript is not valid") {
+		t.Fatalf("err %v", err)
 	}
 }
