@@ -31,6 +31,12 @@ type Session struct {
 	Env            []string // KEY=VALUE, the caller's environment
 	Cwd            string
 
+	// StartHook is a test seam that production leaves nil. A shell start on this session
+	// calls it with "enter" before anything starts, "starting" after the process exists but
+	// before it is registered (the session is locked, so group queries wait), and "started"
+	// once it is registered.
+	StartHook func(stage string)
+
 	mu        sync.Mutex
 	groups    map[int]bool
 	finished  map[int]bool     // groups seen empty after their command ended; nothing is left to stop
@@ -179,13 +185,8 @@ func (s *Session) Run(command, dir string, opts Options) (Result, error) {
 	return s.RunContext(nil, command, dir, opts)
 }
 
-// startHook, when set by a test, is called at the shell-start boundary: "enter" before
-// anything starts, "starting" after the process exists but before it is registered (the
-// session is locked, so group queries wait), and "started" once it is registered.
-var startHook func(stage string)
-
-func hookStart(stage string) {
-	if h := startHook; h != nil {
+func (s *Session) hookStart(stage string) {
+	if h := s.StartHook; h != nil {
 		h(stage)
 	}
 }
@@ -207,7 +208,7 @@ func (s *Session) RunContext(ctx context.Context, command, dir string, opts Opti
 }
 
 func (s *Session) runCaptured(ctx context.Context, command, dir string, opts Options, buf *capBuffer, started func(int)) (Result, error) {
-	hookStart("enter")
+	s.hookStart("enter")
 	if opts.RefuseForeignKill {
 		if rule, refused := ForeignKill(command, s.Owned); refused {
 			return Result{Status: 126, Output: RefusalText(rule), Rule: rule}, nil
@@ -245,13 +246,13 @@ func (s *Session) runCaptured(ctx context.Context, command, dir string, opts Opt
 		return Result{Status: 127, Output: err.Error()}, nil
 	}
 	pgid := cmd.Process.Pid
-	hookStart("starting")
+	s.hookStart("starting")
 	s.groups[pgid] = true
 	if started != nil {
 		started(pgid)
 	}
 	s.mu.Unlock()
-	hookStart("started")
+	s.hookStart("started")
 
 	// Completion and the callback compete for ownership, not for timer.Stop's result.
 	var owner commandLifecycle
