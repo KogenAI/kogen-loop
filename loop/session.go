@@ -84,7 +84,62 @@ type Session struct {
 	input    []any
 	pending  *terminalRef // the terminal call of the last round, if it ended with one
 	seq      int
-	requests int // requests started in the current round (read by Attempt)
+	requests int       // requests started in the current round (read by Attempt)
+	cutReads []cutRead // cut read_file results of this Session, in tool.result order; memory only
+}
+
+// cutRead is a cut read_file result whose tool.result event was emitted: the file it read
+// (root-relative cleaned path, never emitted) and the line numbers its cut omitted.
+type cutRead struct {
+	callID any
+	file   string
+	from   int
+	to     int
+}
+
+// readLines describes a numbered read_file result: its file, its raw first and last line
+// numbers, and the line numbers its cut omitted (nil when uncut).
+type readLines struct {
+	file        string
+	first, last int
+	omitted     *[2]int
+}
+
+// readLinesOf is the line numbers a read_file call's raw result covers, false for any other
+// result (another tool, an error, a notice, text that is not numbered read_file text).
+func (s *Session) readLinesOf(call tools.Call, raw string) (readLines, bool) {
+	if call.Name != tools.ReadFileTool {
+		return readLines{}, false
+	}
+	path, ok := call.Args()["path"].(string)
+	if !ok {
+		return readLines{}, false
+	}
+	first, last, ok := tools.NumberedRange(raw)
+	if !ok {
+		return readLines{}, false
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(s.cfg.Root, path)
+	}
+	r := readLines{file: filepath.Clean(path), first: first, last: last}
+	if from, to, cut := tools.CutOmitted(raw); cut {
+		// Each line counts with the newline that ends it: the first omitted byte lies in the
+		// line after the newlines before it, the last omitted byte in the line after the
+		// newlines before that byte.
+		r.omitted = &[2]int{first + strings.Count(raw[:from], "\n"), first + strings.Count(raw[:to-1], "\n")}
+	}
+	return r, true
+}
+
+// delivered is how many line numbers of a..b this result delivered as complete lines: its raw
+// lines, minus its own omitted range when it was cut.
+func (r readLines) delivered(a, b int) int {
+	overlap := func(lo, hi int) int { return max(0, min(hi, b)-max(lo, a)+1) }
+	if r.omitted == nil {
+		return overlap(r.first, r.last)
+	}
+	return overlap(r.first, r.omitted[0]-1) + overlap(r.omitted[1]+1, r.last)
 }
 
 // terminalRef names the terminal call a completed round ended with.
@@ -289,6 +344,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	rules := map[string]string{}
 	categories := map[string]map[string]any{}
 	shellWaits := map[string]map[string]any{}
+	reads := map[string]readLines{}
 	s.requests = 0
 	rd := Round{
 		Owner: "loop", Role: s.cfg.Role, Instructions: s.instructions, Definitions: s.defs,
@@ -328,6 +384,9 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			out := classified.Output()
 			cut := out.Cut()
 			cutCalls[fmt.Sprint(call.CallID())] = cut.Text != out.Text
+			if r, ok := s.readLinesOf(call, out.Text); ok {
+				reads[fmt.Sprint(call.CallID())] = r
+			}
 			if out.Rule != "" {
 				rules[fmt.Sprint(call.CallID())] = out.Rule
 			}
@@ -362,6 +421,24 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			}
 			if w := shellWaits[fmt.Sprint(call.CallID())]; w != nil {
 				fields["shell_wait"] = w
+			}
+			if r, ok := reads[fmt.Sprint(call.CallID())]; ok {
+				var recovers []map[string]any
+				for _, c := range s.cutReads {
+					if c.file != r.file {
+						continue
+					}
+					if n := r.delivered(c.from, c.to); n > 0 {
+						recovers = append(recovers, map[string]any{"call_id": c.callID, "lines": n})
+					}
+				}
+				if recovers != nil {
+					fields["recovers"] = recovers
+				}
+				if r.omitted != nil {
+					fields["omitted_lines"] = []int{r.omitted[0], r.omitted[1]}
+					s.cutReads = append(s.cutReads, cutRead{callID: call.CallID(), file: r.file, from: r.omitted[0], to: r.omitted[1]})
+				}
 			}
 			s.emit(api.EventToolResult, fields)
 			return nil

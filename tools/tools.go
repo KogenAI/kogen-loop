@@ -993,17 +993,34 @@ func Cut(text string) string {
 	return cutText(text, maxResult, defaultResultHead)
 }
 
+// CutOmitted is the byte range text[from:to] that Cut omits from text, and false when Cut
+// leaves text unchanged. Invalid UTF-8 bytes are replaced before bounding, as Cut does, so the
+// range is of the replaced text, which equals text when text is valid UTF-8.
+func CutOmitted(text string) (from, to int, cut bool) {
+	if !utf8.ValidString(text) {
+		text = string([]rune(text))
+	}
+	_, from, to = cutSpan(text, maxResult, defaultResultHead)
+	return from, to, to > from
+}
+
 func cutText(text string, bound, headSize int) string {
+	cut, _, _ := cutSpan(text, bound, headSize)
+	return cut
+}
+
+// cutSpan is cutText and the byte range text[from:to] it omits (from == to: nothing omitted).
+func cutSpan(text string, bound, headSize int) (cut string, from, to int) {
 	if len(text) <= bound {
-		return text
+		return text, 0, 0
 	}
 	head := validPrefix(text[:headSize])
 	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
 		head = head[:i+1]
 	}
 	if strings.HasSuffix(head, "\n") {
-		if cut, ok := cutLines(text, head, bound, headSize); ok {
-			return cut
+		if cut, tail, ok := cutLines(text, head, bound, headSize); ok {
+			return cut, len(head), len(text) - len(tail)
 		}
 	}
 	marker := func(n int) string { return fmt.Sprintf("\n[... %d bytes omitted ...]\n", n) }
@@ -1012,13 +1029,13 @@ func cutText(text string, bound, headSize int) string {
 	if i := strings.IndexByte(tail, '\n'); i >= 0 {
 		tail = tail[i+1:]
 	}
-	return head + marker(len(text)-len(head)-len(tail)) + tail
+	return head + marker(len(text)-len(head)-len(tail)) + tail, len(head), len(text) - len(tail)
 }
 
 // cutLines is the line form of cutText for a head that ends at a line boundary: the marker also
 // counts the complete lines omitted, with their line-number range when text is numbered. It
-// reports false when the tail has no line boundary.
-func cutLines(text, head string, bound, headSize int) (string, bool) {
+// returns the kept tail, and reports false when the tail has no line boundary.
+func cutLines(text, head string, bound, headSize int) (cut, tail string, ok bool) {
 	first, last, isNumbered := numberedRange(text)
 	total := strconv.Itoa(len(text))
 	width := len("\n[... " + total + " lines, " + total + " bytes omitted ...]\n")
@@ -1028,12 +1045,12 @@ func cutLines(text, head string, bound, headSize int) (string, bool) {
 	}
 	tailSize := bound - headSize - width
 	if tailSize < 0 {
-		return "", false
+		return "", "", false
 	}
-	tail := validSuffix(text[len(text)-tailSize:])
+	tail = validSuffix(text[len(text)-tailSize:])
 	i := strings.IndexByte(tail, '\n')
 	if i < 0 {
-		return "", false
+		return "", "", false
 	}
 	tail = tail[i+1:]
 	middle := text[len(head) : len(text)-len(tail)]
@@ -1049,8 +1066,12 @@ func cutLines(text, head string, bound, headSize int) (string, bool) {
 	} else {
 		marker = fmt.Sprintf("\n[... %d %s, %d bytes omitted ...]\n", lines, unit, len(middle))
 	}
-	return head + marker + tail, true
+	return head + marker + tail, tail, true
 }
+
+// NumberedRange is the first and last line number of numbered read_file text: every line
+// `N<tab>…` with consecutive numbers (the test the line-form cut marker applies).
+func NumberedRange(text string) (first, last int, ok bool) { return numberedRange(text) }
 
 // numberedRange reports whether every line of text begins with a decimal number (no leading zeros,
 // at least 1) and a tab, each one more than the line before, with the first and last numbers.
