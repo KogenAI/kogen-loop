@@ -113,7 +113,19 @@ type Tools struct {
 	// would otherwise take, starts no timer and treats a value received from the returned
 	// channel as that wait elapsing. It cannot change the wait itself.
 	ShellAfter func(wait time.Duration) <-chan time.Time
-	shells     *shellRegistry
+	// Now is a test seam. Production leaves it nil and uses time.Now. When set, it is the
+	// clock of the shell-wait record's wait instants (WaitStarted, WaitEnded) and of the
+	// session's elapsed_ms measurement of each call.
+	Now    func() time.Time
+	shells *shellRegistry
+}
+
+// clock reads Now, or time.Now when Now is nil.
+func (t *Tools) clock() time.Time {
+	if t.Now != nil {
+		return t.Now()
+	}
+	return time.Now()
 }
 
 const (
@@ -1013,7 +1025,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		wait = 30 * time.Second
 	}
 	var elapsed <-chan time.Time
-	waitStarted := time.Now()
+	waitStarted := t.clock()
 	if t.ShellAfter != nil {
 		elapsed = t.ShellAfter(wait)
 	} else {
@@ -1044,7 +1056,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 		}
 		return Classified{}, ctx.Err()
 	}
-	waitEnded := time.Now()
+	waitEnded := t.clock()
 	spawned := j.cmd.Started()
 	if spawned.After(waitEnded) {
 		spawned = time.Time{}

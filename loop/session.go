@@ -351,6 +351,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 	categories := map[string]map[string]any{}
 	shellWaits := map[string]map[string]any{}
 	exitStatuses := map[string]int{}
+	elapsedMS := map[string]int64{}
 	reads := map[string]readLines{}
 	s.requests = 0
 	rd := Round{
@@ -384,10 +385,19 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 		// The engine cuts what it runs itself; the session runs the call here to learn
 		// whether the cut applied, which the engine's order does not report.
 		HandleCall: func(ctx context.Context, call tools.Call) (Handled, error) {
+			now := func() time.Time {
+				if s.tools.Now != nil {
+					return s.tools.Now()
+				}
+				return time.Now()
+			}
+			began := now()
 			classified, err := s.tools.CallClassified(ctx, call)
+			finished := now()
 			if err != nil {
 				return Handled{}, err
 			}
+			elapsedMS[fmt.Sprint(call.CallID())] = finished.Sub(began).Milliseconds()
 			out := classified.Output()
 			cut := out.Cut()
 			cutCalls[fmt.Sprint(call.CallID())] = cut.Text != out.Text
@@ -421,7 +431,7 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) {
 			}
 			fields := map[string]any{
 				"call_id": call.CallID(), "name": call.Name, "result_sha256": sum, "bytes": size,
-				"cut": cutCalls[fmt.Sprint(call.CallID())],
+				"cut": cutCalls[fmt.Sprint(call.CallID())], "elapsed_ms": elapsedMS[fmt.Sprint(call.CallID())],
 			}
 			if rule := rules[fmt.Sprint(call.CallID())]; rule != "" {
 				fields["rule"] = rule
