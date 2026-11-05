@@ -273,7 +273,7 @@ type SessionConfig struct {
     Emit         func(api.Event) // event sink (nil: discard)
 }
 func NewSession(cfg SessionConfig) (*Session, error)
-func ResumeSession(cfg SessionConfig) (*Session, error) // loads Dir/session.json; refuses mismatch (protocol, role, instructions/definitions digest)
+func ResumeSession(cfg SessionConfig) (*Session, error) // loads Dir/session.json (at most 64 MiB); refuses mismatch (protocol, role, instructions/definitions digest)
 func (s *Session) Round(ctx context.Context, text string) (Result, error) // first: opening user message (plus the workspace snapshot of a small repository, see below); later: feedback per the rule above
 ```
 
@@ -393,7 +393,7 @@ Where a tool checks several arguments the class follows the one the text names (
 With `session.dir`, the loop writes `session.json` atomically (0600, directory 0700) **after each completed round**:
 `{protocol, session_id, role, instructions_sha256, definitions_sha256, terminal, input, cut_reads}`. `terminal` is `{"call_id", "name"}` of the last round's terminal call, or `null` after a no-call ending. `cut_reads` is the session's cut-read records (see "Tool result cut"), an array of `{"call_id", "file", "from", "to"}` objects in the order their cut `tool.result` events were emitted, with `file` the root-relative cleaned path; the member is omitted when the session holds no records. The provider cache/routing identity is always the `session_id`, so it survives a resume; existing provider length normalization still applies. A standalone `Session` answers every unanswered call id of the previous round with the feedback.
 
-`resume: true` loads it, refuses any mismatch (`loop/session_mismatch`), and runs one more round with `prompt` as feedback (rule in §2). A crash inside a round resumes from the last completed round. Tool effects after that boundary are the caller's to inspect: the loop doesn't replay or undo them. This standalone transcript is **not** Kogen's checkpoint format. Kogen keeps its own custody through hooks.
+`resume: true` loads it, refuses any mismatch (`loop/session_mismatch`), and runs one more round with `prompt` as feedback (rule in §2). `resume: true` refuses a `session.json` larger than 67108864 bytes with `loop/session_mismatch` and the detail `the session transcript at <path> is <size> bytes, more than the limit of 67108864 bytes`, before reading it; a file of at most 67108864 bytes is decoded directly from the open file. A crash inside a round resumes from the last completed round. Tool effects after that boundary are the caller's to inspect: the loop doesn't replay or undo them. This standalone transcript is **not** Kogen's checkpoint format. Kogen keeps its own custody through hooks.
 
 ## 4. Capabilities (`api.Capabilities`)
 

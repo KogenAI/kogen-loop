@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -167,6 +168,11 @@ type transcript struct {
 
 const transcriptName = "session.json"
 
+// transcriptLimit is the largest session.json ResumeSession reads. It is far above any transcript a
+// normal run writes: the conversation is kept under the request ceiling and one response body is read
+// to at most 64 MiB.
+const transcriptLimit = 64 << 20
+
 func invalid(detail string) error {
 	return sys.Fail(api.ErrClassLoop, api.ErrInvalidTask, detail, api.ExitInvalid)
 }
@@ -203,15 +209,23 @@ func ResumeSession(cfg SessionConfig) (*Session, error) {
 		return nil, err
 	}
 	path := filepath.Join(cfg.Dir, transcriptName)
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, mismatch("no session transcript at " + path)
 		}
 		return nil, mismatch("cannot read the session transcript: " + err.Error())
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, mismatch("cannot read the session transcript: " + err.Error())
+	}
+	if info.Size() > transcriptLimit {
+		return nil, mismatch(fmt.Sprintf("the session transcript at %s is %d bytes, more than the limit of %d bytes", path, info.Size(), int64(transcriptLimit)))
+	}
 	var t transcript
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(io.LimitReader(f, transcriptLimit))
 	dec.UseNumber()
 	if err := dec.Decode(&t); err != nil {
 		return nil, mismatch("the session transcript is not valid: " + err.Error())

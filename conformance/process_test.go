@@ -601,6 +601,20 @@ func TestResumeRefusesAMismatchBeforeAnyRequest(t *testing.T) {
 		r := runCLI(t, w, f, sessionTask(w, dir, true, map[string]any{"instructions": "be brief"}))
 		expectRefusal(t, r, f, "loop", "session_mismatch", 2)
 	})
+	t.Run("transcript above the size bound", func(t *testing.T) {
+		big := t.TempDir()
+		fh, err := os.Create(filepath.Join(big, "session.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fh.Truncate(64<<20 + 1); err != nil {
+			t.Fatal(err)
+		}
+		fh.Close()
+		f := newFakeProvider(t, nil)
+		r := runCLI(t, w, f, sessionTask(w, big, true, map[string]any{"instructions": "be brief"}))
+		expectRefusal(t, r, f, "loop", "session_mismatch", 2)
+	})
 	t.Run("no transcript", func(t *testing.T) {
 		f := newFakeProvider(t, nil)
 		r := runCLI(t, w, f, sessionTask(w, filepath.Join(t.TempDir(), "empty"), true, nil))
