@@ -1,0 +1,292 @@
+package provider_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+type fakeChat struct {
+	srv      *httptest.Server
+	hits     atomic.Int64
+	mu       sync.Mutex
+	statuses []int
+	sizes    []int
+	tools    []bool
+}
+
+func newFakeChat(t *testing.T, statuses ...int) *fakeChat {
+	f := &fakeChat{statuses: statuses}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		n := int(f.hits.Add(1))
+		var body map[string]any
+		json.Unmarshal(data, &body)
+		f.mu.Lock()
+		f.sizes = append(f.sizes, len(data))
+		_, hasTools := body["tools"]
+		f.tools = append(f.tools, hasTools)
+		status := 200
+		if n <= len(f.statuses) {
+			status = f.statuses[n-1]
+		}
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status != 200 {
+			fmt.Fprint(w, `{"error":{"message":"temporary","code":"server_error"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"summary or answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func driverSession(t *testing.T) *sys.Session {
+	home := t.TempDir()
+	return sys.NewWith([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, home)
+}
+
+func driverClient() *provider.Client {
+	return &provider.Client{Sleep: func(ctx context.Context, d time.Duration) error { return nil }, Cache: provider.NewCache(nil)}
+}
+
+func driverRole(f *fakeChat) provider.Role {
+	return provider.Role{Provider: "openai-compatible", Model: "fake-model", BaseURL: f.srv.URL}
+}
+
+func reasonOf(t *testing.T, err error) string {
+	t.Helper()
+	var e *sys.Error
+	if !errors.As(err, &e) {
+		t.Fatalf("want *sys.Error, got %T %v", err, err)
+	}
+	return e.Class + "/" + e.Reason
+}
+
+func newBudget(t *testing.T, l Limits, res int, persist func(int) error) *Budget {
+	t.Helper()
+	b, err := newB(l, res, persist)
+	if err != nil {
+		t.Fatalf("NewRequestBudget(%+v, %d): %v", l, res, err)
+	}
+	return b
+}
+
+func driverRequest(f *fakeChat, b *Budget) provider.Request {
+	return withBudget(provider.Request{Role: driverRole(f), Instructions: "policy",
+		Input: []any{map[string]any{"role": "user", "content": "do it"}}}, b)
+}
+
+func TestStageBudgetSharedAndConcurrent(t *testing.T) {
+	f := newFakeChat(t)
+	c, s := driverClient(), driverSession(t)
+	b := newBudget(t, Limits{MaxRequests: 2}, 0, nil)
+	var wg sync.WaitGroup
+	var ok, refused atomic.Int64
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.Respond(context.Background(), s, driverRequest(f, b), nil)
+			if err == nil {
+				ok.Add(1)
+			} else if got := reasonOf(t, err); got == "provider/request_budget_exhausted" {
+				refused.Add(1)
+			} else {
+				t.Errorf("unexpected error %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if ok.Load() != 2 || refused.Load() != 6 || f.hits.Load() != 2 {
+		t.Fatalf("ok %d refused %d provider hits %d, want 2, 6, 2", ok.Load(), refused.Load(), f.hits.Load())
+	}
+	if got := reserved(b); got != 2 {
+		t.Fatalf("reserved %d, want 2", got)
+	}
+}
+
+func TestStageBudgetRetriesConsumeTheSameCount(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	f := newFakeChat(t, 503, 200)
+	b := newBudget(t, Limits{MaxRequests: 2}, 0, nil)
+	if _, err := c.Respond(context.Background(), s, driverRequest(f, b), nil); err != nil {
+		t.Fatalf("retry within budget: %v", err)
+	}
+	if f.hits.Load() != 2 || reserved(b) != 2 {
+		t.Fatalf("hits %d reserved %d, want 2 and 2", f.hits.Load(), reserved(b))
+	}
+	_, err := c.Respond(context.Background(), s, driverRequest(f, b), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_exhausted" || f.hits.Load() != 2 {
+		t.Fatalf("after exhaustion: %v, hits %d", err, f.hits.Load())
+	}
+	g := newFakeChat(t, 503, 200)
+	one := newBudget(t, Limits{MaxRequests: 1}, 0, nil)
+	_, err = c.Respond(context.Background(), s, driverRequest(g, one), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_exhausted" || g.hits.Load() != 1 {
+		t.Fatalf("retry past the budget: %v, hits %d, want exhausted after 1 hit", err, g.hits.Load())
+	}
+}
+
+func TestStageBudgetNoCallRefusalsAndFailClosedPersistence(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	f := newFakeChat(t)
+	past := newBudget(t, Limits{Deadline: time.Now().Add(-time.Second)}, 0, nil)
+	_, err := c.Respond(context.Background(), s, driverRequest(f, past), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_deadline" || f.hits.Load() != 0 || reserved(past) != 0 {
+		t.Fatalf("expired deadline: %v hits %d reserved %d", err, f.hits.Load(), reserved(past))
+	}
+	fail := true
+	var seen []int
+	b := newBudget(t, Limits{MaxRequests: 2}, 0, func(n int) error {
+		seen = append(seen, n)
+		if fail {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	_, err = c.Respond(context.Background(), s, driverRequest(f, b), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_persist_failed" || f.hits.Load() != 0 {
+		t.Fatalf("persistence refusal: %v hits %d", err, f.hits.Load())
+	}
+	if reserved(b) != 1 {
+		t.Fatalf("failed persistence must stay reserved, reserved %d", reserved(b))
+	}
+	fail = false
+	if _, err = c.Respond(context.Background(), s, driverRequest(f, b), nil); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if reserved(b) != 2 || len(seen) != 2 || seen[0] != 1 || seen[1] != 2 || f.hits.Load() != 1 {
+		t.Fatalf("reserved %d persisted %v hits %d, want 2, [1 2], 1", reserved(b), seen, f.hits.Load())
+	}
+}
+
+func TestStageBudgetSnapshotRestore(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	f := newFakeChat(t)
+	var seen []int
+	b := newBudget(t, Limits{MaxRequests: 3}, 2, func(n int) error { seen = append(seen, n); return nil })
+	if _, err := c.Respond(context.Background(), s, driverRequest(f, b), nil); err != nil {
+		t.Fatal(err)
+	}
+	res, max, data := snapshotOf(b)
+	if res != 3 || max != 3 || len(seen) != 1 || seen[0] != 3 {
+		t.Fatalf("snapshot reserved %d max %d persisted %v", res, max, seen)
+	}
+	for _, bad := range []string{"Authorization", "Bearer", "token", "key"} {
+		if strings.Contains(strings.ToLower(string(data)), strings.ToLower(bad)) {
+			t.Fatalf("snapshot %s leaks %q", data, bad)
+		}
+	}
+	_, err := c.Respond(context.Background(), s, driverRequest(f, b), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_exhausted" || f.hits.Load() != 1 {
+		t.Fatalf("restored count must refuse: %v hits %d", err, f.hits.Load())
+	}
+}
+
+func TestStageBudgetInputBytesAreExact(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	f := newFakeChat(t)
+	if _, err := c.Respond(context.Background(), s, driverRequest(f, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	n := f.sizes[0]
+	f.hits.Store(0)
+	at := newBudget(t, Limits{MaxInputBytes: n}, 0, nil)
+	if _, err := c.Respond(context.Background(), s, driverRequest(f, at), nil); err != nil {
+		t.Fatalf("limit equal to the rendered body (%d bytes): %v", n, err)
+	}
+	below := newBudget(t, Limits{MaxInputBytes: n - 1}, 0, nil)
+	_, err := c.Respond(context.Background(), s, driverRequest(f, below), nil)
+	if got := reasonOf(t, err); got != "provider/request_budget_input_limit" || f.hits.Load() != 1 || reserved(below) != 0 {
+		t.Fatalf("limit %d: %v hits %d reserved %d", n-1, err, f.hits.Load(), reserved(below))
+	}
+}
+
+func TestStageBudgetOutputCeilingWireSupport(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	b := newBudget(t, Limits{MaxOutputTokens: 1000}, 0, nil)
+	msg := withBudget(provider.Request{Role: provider.Role{Provider: "anthropic", Model: "claude-sonnet-5-5", Effort: "high"}, Instructions: "p",
+		Input: []any{map[string]any{"role": "user", "content": "x"}}}, b)
+	body, err := c.Render(msg)
+	if err != nil || fmt.Sprint(body["max_tokens"]) != "1000" {
+		t.Fatalf("Messages route: max_tokens %v, error %v, want 1000", body["max_tokens"], err)
+	}
+	msg = withBudget(msg, nil)
+	body, _ = c.Render(msg)
+	if fmt.Sprint(body["max_tokens"]) == "1000" {
+		t.Fatalf("without a budget max_tokens must stay the profile value, got %v", body["max_tokens"])
+	}
+	f := newFakeChat(t)
+	_, err = c.Respond(context.Background(), s, driverRequest(f, b), nil)
+	if got := reasonOf(t, err); got != "provider/unsupported_capability" || f.hits.Load() != 0 {
+		t.Fatalf("unsupported wire: %v hits %d", err, f.hits.Load())
+	}
+}
+
+func TestStageBudgetValidation(t *testing.T) {
+	bad := []struct {
+		l        Limits
+		reserved int
+	}{
+		{Limits{MaxRequests: -1}, 0},
+		{Limits{MaxInputBytes: -1}, 0},
+		{Limits{MaxInputBytes: provider.InputBudgetBytes + 1}, 0},
+		{Limits{MaxOutputTokens: -1}, 0},
+		{Limits{MaxOutputTokens: provider.OutputReserveTokens + 1}, 0},
+		{Limits{MaxRequests: 2}, -1},
+		{Limits{MaxRequests: 2}, 3},
+	}
+	for _, x := range bad {
+		b, err := newB(x.l, x.reserved, nil)
+		if b != nil || err == nil || reasonOf(t, err) != "validation/invalid_request_budget" {
+			t.Errorf("%+v reserved %d: budget %v error %v, want validation/invalid_request_budget", x.l, x.reserved, b, err)
+		}
+	}
+	if _, err := newB(Limits{MaxRequests: 2, MaxInputBytes: provider.InputBudgetBytes, MaxOutputTokens: provider.OutputReserveTokens}, 2, nil); err != nil {
+		t.Errorf("boundary values are valid: %v", err)
+	}
+}
+
+func TestStageBudgetCompatibilityAndParent(t *testing.T) {
+	c, s := driverClient(), driverSession(t)
+	f := newFakeChat(t)
+	if _, err := c.Respond(context.Background(), s, driverRequest(f, nil), nil); err != nil {
+		t.Fatalf("nil budget: %v", err)
+	}
+	un := newBudget(t, Limits{}, 0, nil)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Respond(context.Background(), s, driverRequest(f, un), nil); err != nil {
+			t.Fatalf("unlimited budget request %d: %v", i, err)
+		}
+	}
+	if f.hits.Load() != 4 || reserved(un) != 3 {
+		t.Fatalf("hits %d reserved %d, want 4 and 3", f.hits.Load(), reserved(un))
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	b := newBudget(t, Limits{MaxRequests: 5, Deadline: time.Now().Add(time.Hour)}, 0, nil)
+	if _, err := c.Respond(cancelled, s, driverRequest(f, b), nil); err == nil || f.hits.Load() != 4 || reserved(b) != 0 {
+		t.Fatalf("cancelled parent: %v hits %d reserved %d", err, f.hits.Load(), reserved(b))
+	}
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+	if _, err := c.Respond(expired, s, driverRequest(f, b), nil); err == nil || f.hits.Load() != 4 || reserved(b) != 0 {
+		t.Fatalf("expired parent deadline: %v hits %d reserved %d", err, f.hits.Load(), reserved(b))
+	}
+}

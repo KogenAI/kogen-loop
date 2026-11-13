@@ -1,0 +1,25 @@
+package provider_test
+
+import (
+	"encoding/json"
+
+	"github.com/KogenAI/kogen-loop/provider"
+)
+
+type Limits = provider.RequestBudgetLimits
+type Budget = provider.RequestBudget
+
+func newB(l Limits, r int, p func(int) error) (*Budget, error) { return provider.NewRequestBudget(l, r, p) }
+
+func reserved(b *Budget) int { return b.Snapshot().Reserved }
+
+func snapshotOf(b *Budget) (int, int, []byte) {
+	s := b.Snapshot()
+	d, _ := json.Marshal(s)
+	return s.Reserved, s.MaxRequests, d
+}
+
+func withBudget(r provider.Request, b *Budget) provider.Request {
+	r.Budget = b
+	return r
+}

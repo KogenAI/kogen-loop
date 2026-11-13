@@ -1,0 +1,142 @@
+package loop_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/loop"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+type fakeChat struct {
+	srv      *httptest.Server
+	hits     atomic.Int64
+	mu       sync.Mutex
+	statuses []int
+	sizes    []int
+	tools    []bool
+}
+
+func newFakeChat(t *testing.T, statuses ...int) *fakeChat {
+	f := &fakeChat{statuses: statuses}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		n := int(f.hits.Add(1))
+		var body map[string]any
+		json.Unmarshal(data, &body)
+		f.mu.Lock()
+		f.sizes = append(f.sizes, len(data))
+		_, hasTools := body["tools"]
+		f.tools = append(f.tools, hasTools)
+		status := 200
+		if n <= len(f.statuses) {
+			status = f.statuses[n-1]
+		}
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status != 200 {
+			fmt.Fprint(w, `{"error":{"message":"temporary","code":"server_error"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"summary or answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func driverSession(t *testing.T) *sys.Session {
+	home := t.TempDir()
+	return sys.NewWith([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, home)
+}
+
+func driverClient() *provider.Client {
+	return &provider.Client{Sleep: func(ctx context.Context, d time.Duration) error { return nil }, Cache: provider.NewCache(nil)}
+}
+
+func driverRole(f *fakeChat) provider.Role {
+	return provider.Role{Provider: "openai-compatible", Model: "fake-model", BaseURL: f.srv.URL}
+}
+
+func reasonOf(t *testing.T, err error) string {
+	t.Helper()
+	var e *sys.Error
+	if !errors.As(err, &e) {
+		t.Fatalf("want *sys.Error, got %T %v", err, err)
+	}
+	return e.Class + "/" + e.Reason
+}
+
+func newBudget(t *testing.T, l Limits, res int, persist func(int) error) *Budget {
+	t.Helper()
+	b, err := newB(l, res, persist)
+	if err != nil {
+		t.Fatalf("NewRequestBudget(%+v, %d): %v", l, res, err)
+	}
+	return b
+}
+
+func bigHistory() []any {
+	input := []any{map[string]any{"role": "user", "content": "original task"}}
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("call_%d", i)
+		input = append(input,
+			map[string]any{"type": "function_call", "call_id": id, "name": "read_file", "arguments": "{}"},
+			map[string]any{"type": "function_call_output", "call_id": id, "output": strings.Repeat("x", 100000)})
+	}
+	return input
+}
+
+func loopRequest(f *fakeChat, input []any) loop.Request {
+	return loop.Request{Owner: "build", Role: driverRole(f), Instructions: "policy", Input: input}
+}
+
+func TestStageBudgetDirectSharesOneCounterAcrossRounds(t *testing.T) {
+	f := newFakeChat(t)
+	b := newBudget(t, Limits{MaxRequests: 2}, 0, nil)
+	d := newDirect(driverClient(), driverSession(t), b)
+	small := []any{map[string]any{"role": "user", "content": "go"}}
+	for i := 0; i < 2; i++ {
+		if _, _, err := d.Request(context.Background(), loopRequest(f, small)); err != nil {
+			t.Fatalf("round %d: %v", i+1, err)
+		}
+	}
+	_, _, err := d.Request(context.Background(), loopRequest(f, small))
+	if got := reasonOf(t, err); got != "provider/request_budget_exhausted" || f.hits.Load() != 2 || reserved(b) != 2 {
+		t.Fatalf("third round: %v hits %d reserved %d", err, f.hits.Load(), reserved(b))
+	}
+}
+
+func TestStageBudgetCondensationSharesTheCount(t *testing.T) {
+	f := newFakeChat(t)
+	b := newBudget(t, Limits{MaxRequests: 1}, 0, nil)
+	d := newDirect(driverClient(), driverSession(t), b)
+	_, _, err := d.Request(context.Background(), loopRequest(f, bigHistory()))
+	if got := reasonOf(t, err); got != "provider/request_budget_exhausted" {
+		t.Fatalf("condensation past the budget: %v", err)
+	}
+	if f.hits.Load() != 1 || reserved(b) != 1 || len(f.tools) != 1 || f.tools[0] {
+		t.Fatalf("hits %d reserved %d tools %v, want one summarization request without tools", f.hits.Load(), reserved(b), f.tools)
+	}
+	g := newFakeChat(t)
+	wide := newBudget(t, Limits{MaxRequests: 10}, 0, nil)
+	d = newDirect(driverClient(), driverSession(t), wide)
+	if _, _, err := d.Request(context.Background(), loopRequest(g, bigHistory())); err != nil {
+		t.Fatalf("condensed request within budget: %v", err)
+	}
+	if g.hits.Load() < 2 || int64(reserved(wide)) != g.hits.Load() {
+		t.Fatalf("hits %d reserved %d: summaries and the normal request must all count", g.hits.Load(), reserved(wide))
+	}
+}

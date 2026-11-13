@@ -1,0 +1,18 @@
+package loop_test
+
+import (
+	"github.com/KogenAI/kogen-loop/loop"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+type Limits = provider.RequestBudgetLimits
+type Budget = provider.RequestBudget
+
+func newB(l Limits, r int, p func(int) error) (*Budget, error) { return provider.NewRequestBudget(l, r, p) }
+
+func reserved(b *Budget) int { return b.Snapshot().Reserved }
+
+func newDirect(c *provider.Client, s *sys.Session, b *Budget) *loop.Direct {
+	return &loop.Direct{Client: c, Session: s, Budget: b}
+}

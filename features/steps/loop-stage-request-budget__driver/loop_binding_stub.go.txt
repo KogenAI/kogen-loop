@@ -1,0 +1,29 @@
+package loop_test
+
+import (
+	"errors"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/loop"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+// Stub binding for a tree without the stage budget: the driver compiles and its tests fail.
+type Limits struct {
+	MaxRequests     int
+	Deadline        time.Time
+	MaxInputBytes   int
+	MaxOutputTokens int
+}
+type Budget struct{}
+
+func newB(l Limits, r int, p func(int) error) (*Budget, error) {
+	return nil, errors.New("provider.RequestBudget is not implemented")
+}
+
+func reserved(b *Budget) int { return -1 }
+
+func newDirect(c *provider.Client, s *sys.Session, b *Budget) *loop.Direct {
+	return &loop.Direct{Client: c, Session: s}
+}
