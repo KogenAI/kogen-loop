@@ -433,7 +433,7 @@ func (r *run) attempts() (*Response, error) {
 		case resOK:
 			return r.response(res), nil
 		case resUnauthorized:
-			if keyed || refreshed {
+			if keyed || refreshed || r.k.managed {
 				return nil, r.k.rejected(res.fail.diagnostics())
 			}
 			fresh, rerr := r.k.refreshed(used, refreshAfter401)

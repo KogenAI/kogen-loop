@@ -1,0 +1,1 @@
+{"deferred":"The correct implementation spans credential validation, per-request token selection, the 401 and expiry stop path, the per-Client regression guard, offline status text and the caller contract; the Build writes it and the scenarios run real Go driver tests against local fakes."}

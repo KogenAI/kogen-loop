@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/KogenAI/kogen-loop/sys"
 )
@@ -48,6 +49,10 @@ func (c credentials) usable(p Info) bool {
 		_, ok := c.apiKey(p)
 		return ok
 	}
+	if c.hasMode() {
+		// A file with a mode is never an interactive login; see managedFault.
+		return false
+	}
 	if _, ok := asInt(c["expires_at"]); !ok {
 		return false
 	}
@@ -63,6 +68,50 @@ func (c credentials) usable(p Info) bool {
 	}
 }
 
+// managedMode is the exact value of the `mode` field that selects a managed access snapshot.
+const managedMode = "managed_access"
+
+// hasMode reports whether the file carries a `mode` key at all; such a file is judged only
+// as a managed access snapshot and is never reinterpreted as an interactive login.
+func (c credentials) hasMode() bool {
+	_, ok := c["mode"]
+	return ok
+}
+
+// managedFault names the first fault that makes the file unusable as a managed access
+// snapshot of p, or "" when it is structurally valid. It never includes a value.
+func (c credentials) managedFault(p Info) string {
+	switch {
+	case c["mode"] != managedMode:
+		return "mode"
+	case p.Name != "chatgpt" || c["provider"] != "chatgpt":
+		return "provider"
+	}
+	if _, ok := c["refresh_token"]; ok {
+		return "refresh"
+	}
+	if _, ok := c["client_secret"]; ok {
+		return "secret"
+	}
+	if !nonempty(c["access_token"]) {
+		return "access_token"
+	}
+	if _, ok := asInt(c["expires_at"]); !ok {
+		return "expires_at"
+	}
+	if id, _ := c["client_id"].(string); len(id) <= 7 || !strings.HasPrefix(id, "oaiapp_") {
+		return "client_id"
+	}
+	return ""
+}
+
+// managedFresh reports whether the snapshot is outside the 60-second margin at now.
+func (c credentials) managedFresh(now int64) bool { return c.expiresAt()-60 > now }
+
+func managedUnusable(fault string) *sys.Error {
+	return providerFail("login", "managed access snapshot cannot be used: "+fault)
+}
+
 func (c credentials) expiresAt() int64 {
 	n, _ := asInt(c["expires_at"])
 	return n
@@ -74,6 +123,8 @@ func emailSuffix(email any) string {
 	}
 	return ""
 }
+
+const managedNote = "(local status only; server, account and quota not qualified)"
 
 func loginHint(p Info) string { return "run kogen provider login " + p.Name }
 
@@ -96,6 +147,12 @@ func Status(home string) []string {
 			state = "saved key has no origin; log in again"
 		case p.key && c.usable(p):
 			state = "key saved (not verified)"
+		case p.Name == "chatgpt" && c.hasMode():
+			if c.managedFault(p) == "" && c.managedFresh(time.Now().Unix()) {
+				state = "managed access snapshot fresh " + managedNote
+			} else {
+				state = "managed access snapshot expired or invalid; owner refresh required " + managedNote
+			}
 		case p.Name == "anthropic" || p.optionalKey:
 			// An unusable Anthropic file reads as no login at all.
 			state = "not signed in"
@@ -152,6 +209,12 @@ func storedCredentials(home string, p Info) (credentials, error) {
 	c := readCredentials(home, p)
 	if c == nil {
 		return nil, providerFail("login", "not signed in; "+loginHint(p))
+	}
+	if c.hasMode() {
+		if fault := c.managedFault(p); fault != "" {
+			return nil, managedUnusable(fault)
+		}
+		return c, nil
 	}
 	if !c.usable(p) {
 		return nil, providerFail("login", "saved login cannot be used; "+loginHint(p))

@@ -1,0 +1,471 @@
+package provider_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+const (
+	mgTok    = "managed-fake-access-token"
+	mgSecret = "managed-fake-refresh-secret"
+	mgNote   = "(local status only; server, account and quota not qualified)"
+)
+
+type mgServer struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	live     []string // Authorization header of each inference request
+	auth     int      // requests to any non-inference path (OAuth refresh or login)
+	statuses []int    // status per inference request, in order; past the end 200
+}
+
+func newMgServer(t *testing.T, statuses ...int) *mgServer {
+	m := &mgServer{statuses: statuses}
+	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		m.mu.Lock()
+		if r.URL.Path != "/v1/responses" {
+			m.auth++
+			m.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			io.WriteString(w, `{}`)
+			return
+		}
+		m.live = append(m.live, r.Header.Get("Authorization"))
+		status := 200
+		if n := len(m.live); n <= len(m.statuses) {
+			status = m.statuses[n-1]
+		}
+		m.mu.Unlock()
+		if status == 401 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			io.WriteString(w, `{"error":{"message":"expired","code":"invalid_token"}}`)
+			return
+		}
+		item := map[string]any{"type": "message", "id": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok", "annotations": []any{}}}}
+		usage := map[string]any{"input_tokens": 1, "input_tokens_details": map[string]any{"cached_tokens": 0}, "output_tokens": 1, "output_tokens_details": map[string]any{"reasoning_tokens": 0}}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []any{
+			map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
+			map[string]any{"type": "response.completed", "response": map[string]any{"usage": usage}},
+		} {
+			b, _ := json.Marshal(ev)
+			io.WriteString(w, "data: "+string(b)+"\n\n")
+		}
+	}))
+	t.Cleanup(m.srv.Close)
+	return m
+}
+
+func (m *mgServer) liveCount() int { m.mu.Lock(); defer m.mu.Unlock(); return len(m.live) }
+func (m *mgServer) authCount() int { m.mu.Lock(); defer m.mu.Unlock(); return m.auth }
+func (m *mgServer) lives() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.live...)
+}
+
+type mgClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *mgClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *mgClock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+type mgEnv struct {
+	t    *testing.T
+	home string
+	srv  *mgServer
+	clk  *mgClock
+}
+
+func newMgEnv(t *testing.T, statuses ...int) *mgEnv {
+	return &mgEnv{t: t, home: t.TempDir(), srv: newMgServer(t, statuses...), clk: &mgClock{t: time.Unix(1_800_000_000, 0)}}
+}
+
+func (e *mgEnv) credPath() string { return filepath.Join(e.home, ".kogen", "credentials", "chatgpt.json") }
+
+func (e *mgEnv) session() *sys.Session {
+	return sys.NewWith([]string{"HOME=" + e.home, "PATH=" + os.Getenv("PATH"), "KOGEN_PROVIDER_URL=" + e.srv.srv.URL, "KOGEN_AUTH_URL=" + e.srv.srv.URL}, e.home)
+}
+
+func (e *mgEnv) client() *provider.Client {
+	return &provider.Client{Now: e.clk.Now, Cache: provider.NewCache(nil), Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+}
+
+func (e *mgEnv) snapshot(tok string, expiresIn int64, mods ...any) map[string]any {
+	m := map[string]any{"mode": "managed_access", "provider": "chatgpt", "client_id": "oaiapp_fixture", "access_token": tok, "expires_at": e.clk.Now().Unix() + expiresIn}
+	for i := 0; i < len(mods); i += 2 {
+		if mods[i+1] == nil {
+			delete(m, mods[i].(string))
+		} else {
+			m[mods[i].(string)] = mods[i+1]
+		}
+	}
+	return m
+}
+
+// publish is the fake external owner: a private temporary file renamed over the snapshot.
+func (e *mgEnv) publish(m map[string]any) {
+	e.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(e.credPath()), 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	data, _ := json.Marshal(m)
+	tmp := filepath.Join(e.home, "owner-tmp.json")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.Rename(tmp, e.credPath()); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *mgEnv) bytes() []byte {
+	e.t.Helper()
+	b, err := os.ReadFile(e.credPath())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return b
+}
+
+func (e *mgEnv) credDir() []string {
+	ents, err := os.ReadDir(filepath.Dir(e.credPath()))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var names []string
+	for _, x := range ents {
+		names = append(names, x.Name())
+	}
+	return names
+}
+
+func mgRequest(b *provider.RequestBudget, single bool) provider.Request {
+	return provider.Request{Role: provider.Role{Provider: "chatgpt", Model: "gpt-6.1-sol", Effort: "high"}, Instructions: "policy",
+		Input: []any{map[string]any{"role": "user", "content": "do it"}}, Budget: b, Single: single}
+}
+
+func (e *mgEnv) respond(ctx context.Context, cl *provider.Client, b *provider.RequestBudget, single bool) error {
+	_, err := cl.Respond(ctx, e.session(), mgRequest(b, single), nil)
+	return err
+}
+
+func mgNoSecret(t *testing.T, what string, texts ...string) {
+	t.Helper()
+	for _, s := range texts {
+		for _, secret := range []string{mgTok, mgSecret, "managed-fake-client-secret"} {
+			if strings.Contains(s, secret) {
+				t.Fatalf("%s leaks credential material %q: %s", what, secret, s)
+			}
+		}
+	}
+}
+
+func mgErr(t *testing.T, err error, wants ...string) string {
+	t.Helper()
+	var se *sys.Error
+	if !errors.As(err, &se) {
+		t.Fatalf("want *sys.Error, got %T %v", err, err)
+	}
+	msg := se.Class + "/" + se.Reason + ": " + se.Detail
+	for _, w := range wants {
+		if !strings.Contains(msg, w) {
+			t.Fatalf("error %q lacks %q", msg, w)
+		}
+	}
+	mgNoSecret(t, "error", msg)
+	return msg
+}
+
+func TestManagedAccessAcceptedAndRefused(t *testing.T) {
+	e := newMgEnv(t)
+	e.publish(e.snapshot(mgTok, 3600))
+	before := e.bytes()
+	if err := e.respond(context.Background(), e.client(), nil, false); err != nil {
+		t.Fatalf("fresh managed snapshot with no refresh token must be accepted: %v", err)
+	}
+	if got := e.srv.lives(); !reflect.DeepEqual(got, []string{"Bearer " + mgTok}) || e.srv.authCount() != 0 {
+		t.Fatalf("live requests %v auth requests %d, want one bearer request and no OAuth call", got, e.srv.authCount())
+	}
+	if string(e.bytes()) != string(before) {
+		t.Fatal("the worker changed the managed snapshot")
+	}
+	cases := []struct {
+		name string
+		snap map[string]any
+		want string
+	}{
+		{"missing access_token", e.snapshot(mgTok, 3600, "access_token", nil), "managed access"},
+		{"empty access_token", e.snapshot("", 3600), "managed access"},
+		{"missing expires_at", e.snapshot(mgTok, 3600, "expires_at", nil), "managed access"},
+		{"malformed expires_at", e.snapshot(mgTok, 3600, "expires_at", "soon"), "managed access"},
+		{"missing client_id", e.snapshot(mgTok, 3600, "client_id", nil), "managed access"},
+		{"foreign client_id", e.snapshot(mgTok, 3600, "client_id", "other-client"), "managed access"},
+		{"missing provider", e.snapshot(mgTok, 3600, "provider", nil), "managed access"},
+		{"foreign provider", e.snapshot(mgTok, 3600, "provider", "supergrok"), "managed access"},
+		{"incompatible mode", e.snapshot(mgTok, 3600, "mode", "interactive"), "managed access"},
+		{"refresh_token present", e.snapshot(mgTok, 3600, "refresh_token", mgSecret), "refresh"},
+		{"empty refresh_token key present", e.snapshot(mgTok, 3600, "refresh_token", ""), "refresh"},
+		{"client_secret present", e.snapshot(mgTok, 3600, "client_secret", "managed-fake-client-secret"), "secret"},
+	}
+	for _, c := range cases {
+		x := newMgEnv(t)
+		x.publish(c.snap)
+		err := x.respond(context.Background(), x.client(), nil, false)
+		if err == nil || x.srv.liveCount() != 0 || x.srv.authCount() != 0 {
+			t.Fatalf("%s: err %v live %d auth %d, want a refusal before any network call", c.name, err, x.srv.liveCount(), x.srv.authCount())
+		}
+		mgErr(t, err, c.want)
+	}
+	// An ordinary incomplete legacy profile (no mode, no refresh token) is still refused as before.
+	legacy := newMgEnv(t)
+	legacy.publish(map[string]any{"client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": legacy.clk.Now().Unix() + 3600})
+	err := legacy.respond(context.Background(), legacy.client(), nil, false)
+	if err == nil || legacy.srv.liveCount() != 0 {
+		t.Fatalf("incomplete legacy profile: err %v live %d, want a refusal and no request", err, legacy.srv.liveCount())
+	}
+	mgErr(t, err, "saved login cannot be used")
+	// A valid interactive full OAuth profile keeps working.
+	full := newMgEnv(t)
+	full.publish(map[string]any{"client_id": "oaiapp_fixture", "access_token": mgTok, "refresh_token": mgSecret, "expires_at": full.clk.Now().Unix() + 3600})
+	if err := full.respond(context.Background(), full.client(), nil, false); err != nil || full.srv.liveCount() != 1 {
+		t.Fatalf("interactive profile: err %v live %d, want one successful request", err, full.srv.liveCount())
+	}
+}
+
+func TestManagedExpiryRejectionAndResume(t *testing.T) {
+	// Boundary: the existing 60-second safety margin.
+	for _, c := range []struct {
+		in   int64
+		want bool
+	}{{61, true}, {60, false}, {10, false}, {-5, false}} {
+		e := newMgEnv(t)
+		e.publish(e.snapshot(mgTok, c.in))
+		before := e.bytes()
+		err := e.respond(context.Background(), e.client(), nil, false)
+		if c.want && err != nil {
+			t.Fatalf("expires in %d s must be accepted: %v", c.in, err)
+		}
+		if !c.want {
+			if err == nil || e.srv.liveCount() != 0 || e.srv.authCount() != 0 {
+				t.Fatalf("expires in %d s: err %v live %d auth %d, want a refusal and no network", c.in, err, e.srv.liveCount(), e.srv.authCount())
+			}
+			mgErr(t, err, "owner refresh required")
+		}
+		if string(e.bytes()) != string(before) {
+			t.Fatalf("expires in %d s: snapshot bytes changed", c.in)
+		}
+	}
+	// A provider 401 stops: no refresh, no login, no retry, no fallback, bytes unchanged, no new files.
+	e := newMgEnv(t, 401, 200)
+	e.publish(e.snapshot(mgTok, 3600))
+	before := e.bytes()
+	b, _ := provider.NewRequestBudget(provider.RequestBudgetLimits{MaxRequests: 2}, 0, nil)
+	cl := e.client()
+	err := e.respond(context.Background(), cl, b, false)
+	if err == nil {
+		t.Fatal("a 401 must stop the request")
+	}
+	mgErr(t, err, "owner refresh required")
+	if e.srv.liveCount() != 1 || e.srv.authCount() != 0 || b.Snapshot().Reserved != 1 {
+		t.Fatalf("after 401: live %d auth %d reserved %d, want 1, 0, 1", e.srv.liveCount(), e.srv.authCount(), b.Snapshot().Reserved)
+	}
+	if string(e.bytes()) != string(before) || !reflect.DeepEqual(e.credDir(), []string{"chatgpt.json"}) {
+		t.Fatalf("snapshot changed or files were created: %v", e.credDir())
+	}
+	single := newMgEnv(t, 401)
+	single.publish(single.snapshot(mgTok, 3600))
+	if err := single.respond(context.Background(), single.client(), nil, true); err == nil || single.srv.liveCount() != 1 || single.srv.authCount() != 0 {
+		t.Fatalf("single 401: err %v live %d auth %d", err, single.srv.liveCount(), single.srv.authCount())
+	} else {
+		mgErr(t, err, "owner refresh required")
+	}
+	// The owner publishes a newer snapshot; a later request reads it and does not reset the budget.
+	e.publish(e.snapshot("managed-fake-newer-token", 7200))
+	if err := e.respond(context.Background(), cl, b, false); err != nil {
+		t.Fatalf("a newer valid snapshot must be used by a later request: %v", err)
+	}
+	if got := e.srv.lives(); !reflect.DeepEqual(got, []string{"Bearer " + mgTok, "Bearer managed-fake-newer-token"}) || e.srv.authCount() != 0 {
+		t.Fatalf("live requests %v auth %d", got, e.srv.authCount())
+	}
+	if b.Snapshot().Reserved != 2 {
+		t.Fatalf("reserved %d, want 2: a new snapshot never resets the request budget", b.Snapshot().Reserved)
+	}
+	if err := e.respond(context.Background(), cl, b, false); err == nil || e.srv.liveCount() != 2 {
+		t.Fatalf("the exhausted budget must still stop the third request: err %v live %d", err, e.srv.liveCount())
+	}
+	// Expiry crossing: the clock passes the expiry between two admitted requests.
+	x := newMgEnv(t)
+	x.publish(x.snapshot(mgTok, 300))
+	cl = x.client()
+	if err := x.respond(context.Background(), cl, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	x.clk.add(300 * time.Second)
+	if err := x.respond(context.Background(), cl, nil, false); err == nil || x.srv.liveCount() != 1 || x.srv.authCount() != 0 {
+		t.Fatalf("expired between requests: err %v live %d auth %d", err, x.srv.liveCount(), x.srv.authCount())
+	} else {
+		mgErr(t, err, "owner refresh required")
+	}
+	// Cancellation sends nothing and leaves the snapshot alone.
+	c := newMgEnv(t)
+	c.publish(c.snapshot(mgTok, 3600))
+	cb := c.bytes()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.respond(ctx, c.client(), nil, false); err == nil || c.srv.liveCount() != 0 || c.srv.authCount() != 0 || string(c.bytes()) != string(cb) {
+		t.Fatalf("cancelled request: err %v live %d auth %d", err, c.srv.liveCount(), c.srv.authCount())
+	}
+}
+
+func TestManagedSharedSnapshotConcurrency(t *testing.T) {
+	e := newMgEnv(t)
+	e.publish(e.snapshot("managed-tok-0", 3600))
+	const owners = 25
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	published := map[string]bool{"Bearer managed-tok-0": true}
+	var pm sync.Mutex
+	wg.Add(1)
+	go func() { // the fake external owner replaces the snapshot atomically
+		defer wg.Done()
+		for i := 1; i <= owners; i++ {
+			tok := "managed-tok-" + string(rune('a'+i-1))
+			pm.Lock()
+			published["Bearer "+tok] = true
+			pm.Unlock()
+			e.publish(e.snapshot(tok, 3600+int64(i)))
+			time.Sleep(time.Millisecond)
+		}
+		close(stop)
+	}()
+	errs := make(chan error, 64)
+	for w := 0; w < 6; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl := e.client()
+			for {
+				if err := e.respond(context.Background(), cl, nil, false); err != nil {
+					errs <- err
+					return
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("worker request failed with a partial or unusable snapshot: %v", err)
+	}
+	pm.Lock()
+	for _, h := range e.srv.lives() {
+		if !published[h] {
+			t.Fatalf("worker used material nobody published: %q", h)
+		}
+	}
+	pm.Unlock()
+	if e.srv.authCount() != 0 {
+		t.Fatalf("workers made %d OAuth calls", e.srv.authCount())
+	}
+	if !reflect.DeepEqual(e.credDir(), []string{"chatgpt.json"}) {
+		t.Fatalf("workers created files next to the snapshot: %v", e.credDir())
+	}
+	if strings.Contains(string(e.bytes()), "refresh") {
+		t.Fatal("a refresh chain appeared in the snapshot")
+	}
+	// Read-only: with the directory and file unwritable a worker still works (no lock, no write).
+	dir := filepath.Dir(e.credPath())
+	os.Chmod(e.credPath(), 0o400)
+	os.Chmod(dir, 0o500)
+	defer os.Chmod(dir, 0o700)
+	if err := e.respond(context.Background(), e.client(), nil, false); err != nil {
+		t.Fatalf("worker needs write access to the managed snapshot: %v", err)
+	}
+	os.Chmod(dir, 0o700)
+	// A regressed snapshot (older expiry than one this client already accepted) is never used.
+	r := newMgEnv(t)
+	r.publish(r.snapshot("managed-newer", 7200))
+	cl := r.client()
+	if err := r.respond(context.Background(), cl, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	r.publish(r.snapshot("managed-older", 3600))
+	err := r.respond(context.Background(), cl, nil, false)
+	if err == nil || r.srv.liveCount() != 1 || r.srv.authCount() != 0 {
+		t.Fatalf("regressed snapshot: err %v live %d auth %d, want a refusal and no request", err, r.srv.liveCount(), r.srv.authCount())
+	}
+	mgErr(t, err, "owner refresh required")
+	r.publish(r.snapshot("managed-newest", 9000))
+	if err := r.respond(context.Background(), cl, nil, false); err != nil {
+		t.Fatalf("a newer snapshot after a regression must work: %v", err)
+	}
+}
+
+func TestManagedStatusIsOfflineAndLocal(t *testing.T) {
+	status := func(e *mgEnv) string {
+		var line string
+		for _, l := range provider.Status(e.home) {
+			if strings.HasPrefix(l, "chatgpt:") {
+				line = l
+			}
+		}
+		mgNoSecret(t, "status", strings.Join(provider.Status(e.home), "\n"))
+		return line
+	}
+	now := time.Now().Unix()
+	fresh := newMgEnv(t)
+	fresh.publish(map[string]any{"mode": "managed_access", "provider": "chatgpt", "client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": now + 3600})
+	if got, want := status(fresh), "chatgpt: managed access snapshot fresh "+mgNote; got != want {
+		t.Fatalf("fresh managed status %q, want %q", got, want)
+	}
+	for name, m := range map[string]map[string]any{
+		"expired":        {"mode": "managed_access", "provider": "chatgpt", "client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": now - 10},
+		"near expiry":    {"mode": "managed_access", "provider": "chatgpt", "client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": now + 20},
+		"refresh secret": {"mode": "managed_access", "provider": "chatgpt", "client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": now + 3600, "refresh_token": mgSecret},
+		"no identity":    {"mode": "managed_access", "access_token": mgTok, "expires_at": now + 3600},
+	} {
+		x := newMgEnv(t)
+		x.publish(m)
+		if got, want := status(x), "chatgpt: managed access snapshot expired or invalid; owner refresh required "+mgNote; got != want {
+			t.Fatalf("%s: status %q, want %q", name, got, want)
+		}
+	}
+	inter := newMgEnv(t)
+	inter.publish(map[string]any{"client_id": "oaiapp_fixture", "access_token": mgTok, "refresh_token": mgSecret, "expires_at": now + 3600, "email": "fake@example.test"})
+	if got, want := status(inter), "chatgpt: signed in (fake@example.test)"; got != want {
+		t.Fatalf("interactive status %q, want %q", got, want)
+	}
+	legacy := newMgEnv(t)
+	legacy.publish(map[string]any{"client_id": "oaiapp_fixture", "access_token": mgTok, "expires_at": now + 3600})
+	if got, want := status(legacy), "chatgpt: saved login cannot be used; run kogen provider login chatgpt"; got != want {
+		t.Fatalf("legacy incomplete status %q, want %q", got, want)
+	}
+	if fresh.srv.liveCount()+fresh.srv.authCount() != 0 {
+		t.Fatal("status contacted the network")
+	}
+}
