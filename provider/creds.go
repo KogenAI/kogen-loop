@@ -80,18 +80,19 @@ func loginHint(p Info) string { return "run kogen provider login " + p.Name }
 // Status is the offline `kogen provider list` output: one line per provider, in
 // catalog order. It reads only Kogen's own credential files and makes no request. A provider
 // whose key is optional (openai-compatible) is listed only once a key is saved: a keyless
-// local host needs no login.
+// local host needs no login. The experimental messages-compatible route is likewise listed only
+// once a key is saved.
 func Status(home string) []string {
 	var lines []string
 	for _, p := range Catalog() {
 		c := readCredentials(home, p)
 		var state string
 		switch {
-		case c == nil && p.optionalKey:
+		case c == nil && (p.optionalKey || p.messagesCompatible()):
 			continue
 		case c == nil:
 			state = "not signed in"
-		case p.compatible() && c.usable(p) && c["origin"] == nil:
+		case p.external() && c.usable(p) && c["origin"] == nil:
 			state = "saved key has no origin; log in again"
 		case p.key && c.usable(p):
 			state = "key saved (not verified)"

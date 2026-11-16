@@ -1,0 +1,1 @@
+{"deferred":"The correct implementation spans the provider catalog, credential origin binding, login, Messages destination selection, offline text and the caller contract; the Build writes it and the scenarios run real Go driver tests against local fakes."}

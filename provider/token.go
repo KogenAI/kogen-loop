@@ -33,7 +33,7 @@ func (k *call) accessToken() (string, error) {
 	if k.info.key {
 		// An API key does not expire or refresh. An optional key may be absent: "" sends no
 		// Authorization header. A compatible key is bound to the origin it was saved for.
-		if k.info.compatible() {
+		if k.info.external() {
 			return k.compatibleToken()
 		}
 		return storedKey(k.home, k.info)

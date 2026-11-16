@@ -159,7 +159,7 @@ func hasImage(v any) bool {
 
 func imageRefusal(info Info) error {
 	why := "images are unqualified"
-	if info.Name == "anthropic" {
+	if info.Name == "anthropic" || info.messagesCompatible() {
 		why = "images are unsupported"
 	}
 	return providerFail("unsupported_capability", info.Label+" "+why+"; use external image preparation and pixel-review handoff")

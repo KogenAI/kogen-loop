@@ -276,7 +276,7 @@ func TestUnknownProviderRefusalListsTheProviders(t *testing.T) {
 	f := newFakeProvider(t, nil)
 	r := runCLI(t, w, f, w.task(map[string]any{"role": map[string]any{"provider": "nobody", "model": "m", "effort": "e", "base_url": ""}}))
 	expectRefusal(t, r, f, "loop", "invalid_task", 2)
-	if got := r.first("error")["detail"]; got != "unknown provider nobody; the providers are chatgpt, supergrok, opencode-go, anthropic, openai-compatible" {
+	if got := r.first("error")["detail"]; got != "unknown provider nobody; the providers are chatgpt, supergrok, opencode-go, anthropic, openai-compatible, messages-compatible" {
 		t.Errorf("detail %q", got)
 	}
 	if r.first("session.started") != nil {
@@ -290,7 +290,7 @@ func TestMissingProviderRefusalSaysItIsRequired(t *testing.T) {
 	f := newFakeProvider(t, nil)
 	r := runCLI(t, w, f, w.task(map[string]any{"role": map[string]any{"provider": "", "model": "m", "effort": "e", "base_url": ""}}))
 	expectRefusal(t, r, f, "loop", "invalid_task", 2)
-	if got := r.first("error")["detail"]; got != "role.provider is required; the providers are chatgpt, supergrok, opencode-go, anthropic, openai-compatible" {
+	if got := r.first("error")["detail"]; got != "role.provider is required; the providers are chatgpt, supergrok, opencode-go, anthropic, openai-compatible, messages-compatible" {
 		t.Errorf("detail %q", got)
 	}
 	if r.first("session.started") != nil {
@@ -746,7 +746,7 @@ func TestCapabilitiesNeedNoNetworkOrCredentials(t *testing.T) {
 	if got := caps["terminal_default"]; !match([]any{"finish"}, got) {
 		t.Errorf("terminal_default %v", got)
 	}
-	if got := caps["providers"]; !match([]any{"chatgpt", "supergrok", "opencode-go", "anthropic", "openai-compatible"}, got) {
+	if got := caps["providers"]; !match([]any{"chatgpt", "supergrok", "opencode-go", "anthropic", "openai-compatible", "messages-compatible"}, got) {
 		t.Errorf("providers %v", got)
 	}
 	if got := caps["tools"]; !match([]any{"read_file", "write_file", "list_files", "search_text", "shell", "view_image", "documentation"}, got) {

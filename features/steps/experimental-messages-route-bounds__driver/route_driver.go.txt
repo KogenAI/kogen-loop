@@ -1,0 +1,281 @@
+package provider_test
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+const extName = "messages-compatible"
+const extBase = "https://qwen.example.test/compatible-mode"
+
+type hit struct{ url, key, body string }
+
+type fakeExt struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	hits     []hit
+	statuses []int
+	tool     bool
+}
+
+func sse(name, data string) string { return "event: " + name + "\ndata: " + data + "\n\n" }
+
+func (f *fakeExt) answer() string {
+	start := sse("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"qwen-x","content":[],"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":4}}}`)
+	if f.tool {
+		return start +
+			sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}`) +
+			sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\"}"}}`) +
+			sse("content_block_stop", `{"type":"content_block_stop","index":0}`) +
+			sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}`) +
+			sse("message_stop", `{"type":"message_stop"}`)
+	}
+	return start +
+		sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`) +
+		sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}`) +
+		sse("content_block_stop", `{"type":"content_block_stop","index":0}`) +
+		sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`) +
+		sse("message_stop", `{"type":"message_stop"}`)
+}
+
+func newExt(t *testing.T, statuses ...int) *fakeExt {
+	f := &fakeExt{statuses: statuses}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.hits = append(f.hits, hit{url: r.Header.Get("X-Orig-URL"), key: r.Header.Get("x-api-key"), body: string(data)})
+		n := len(f.hits)
+		status := 200
+		if n <= len(f.statuses) {
+			status = f.statuses[n-1]
+		}
+		body := f.answer()
+		f.mu.Unlock()
+		if status == 429 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(429)
+			io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"quota exhausted"}}`)
+			return
+		}
+		if status != 200 {
+			w.WriteHeader(status)
+			io.WriteString(w, `{"type":"error","error":{"type":"api_error","message":"temporary"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeExt) setTool(v bool) { f.mu.Lock(); f.tool = v; f.mu.Unlock() }
+
+func (f *fakeExt) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.hits) }
+
+type reroute struct{ f *fakeExt }
+
+func (r reroute) RoundTrip(req *http.Request) (*http.Response, error) {
+	c := req.Clone(req.Context())
+	c.Header.Set("X-Orig-URL", req.URL.String())
+	u := *req.URL
+	u.Scheme, u.Host = "http", strings.TrimPrefix(r.f.srv.URL, "http://")
+	c.URL = &u
+	return http.DefaultTransport.RoundTrip(c)
+}
+
+func extClient(f *fakeExt) *provider.Client {
+	return &provider.Client{HTTP: &http.Client{Transport: reroute{f}}, Cache: provider.NewCache(nil),
+		Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+}
+
+func extSession(t *testing.T, saveFor string, extraEnv ...string) *sys.Session {
+	home := t.TempDir()
+	save := func(name, body string) {
+		p := filepath.Join(home, ".kogen", "credentials", name+".json")
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if saveFor != "" {
+		save(extName, `{"provider":"`+extName+`","api_key":"fake-ext-key","origin":"`+saveFor+`"}`)
+	}
+	save("anthropic", `{"provider":"anthropic","api_key":"fake-native-key"}`)
+	return sys.NewWith(append([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, extraEnv...), home)
+}
+
+func extRequest(base string, b *provider.RequestBudget) provider.Request {
+	return provider.Request{Role: provider.Role{Provider: extName, Model: "qwen-x", Effort: "high", BaseURL: base},
+		Instructions: "policy", Input: []any{map[string]any{"role": "user", "content": "do it"}}, Budget: b}
+}
+
+func reason(t *testing.T, err error) string {
+	t.Helper()
+	var e *sys.Error
+	if !errors.As(err, &e) {
+		t.Fatalf("want *sys.Error, got %T %v", err, err)
+	}
+	return e.Class + "/" + e.Reason
+}
+
+func TestExternalMessagesDestinationAndRequest(t *testing.T) {
+	f := newExt(t)
+	if _, err := extClient(f).Respond(context.Background(), extSession(t, "https://qwen.example.test"), extRequest(extBase+"/", nil), nil); err != nil {
+		t.Fatalf("explicit external route: %v", err)
+	}
+	if f.count() != 1 {
+		t.Fatalf("hits %d, want 1", f.count())
+	}
+	h := f.hits[0]
+	if h.url != "https://qwen.example.test/compatible-mode/v1/messages" || h.key != "fake-ext-key" {
+		t.Fatalf("destination %q key %q, want https://qwen.example.test/compatible-mode/v1/messages and the origin-bound key", h.url, h.key)
+	}
+	if !strings.Contains(h.body, `"model":"qwen-x"`) || !strings.Contains(h.body, `"stream":true`) {
+		t.Fatalf("body does not carry the declared model: %s", h.body)
+	}
+	if body, err := extClient(f).Render(extRequest(extBase, nil)); err != nil || body["model"] != "qwen-x" {
+		t.Fatalf("Render: %v %v", body, err)
+	}
+}
+
+func TestExternalMessagesSendsNothingWhenAmbiguous(t *testing.T) {
+	control := newExt(t)
+	if _, err := extClient(control).Respond(context.Background(), extSession(t, "https://qwen.example.test"), extRequest(extBase, nil), nil); err != nil || control.count() != 1 {
+		t.Fatalf("positive control: an explicit, origin-matched request must be sent once: err %v hits %d", err, control.count())
+	}
+	cases := []struct {
+		name string
+		s    *sys.Session
+		base string
+	}{
+		{"no base_url", extSession(t, "https://qwen.example.test"), ""},
+		{"no saved credential, only native anthropic key", extSession(t, ""), extBase},
+		{"credential bound to another origin", extSession(t, "https://other.example.test"), extBase},
+		{"plaintext destination", extSession(t, "http://qwen.example.test"), "http://qwen.example.test/x"},
+		{"provider URL seam set", extSession(t, "https://qwen.example.test", "KOGEN_PROVIDER_URL=http://127.0.0.1:9"), extBase},
+	}
+	for _, c := range cases {
+		f := newExt(t)
+		_, err := extClient(f).Respond(context.Background(), c.s, extRequest(c.base, nil), nil)
+		if err == nil || f.count() != 0 {
+			t.Fatalf("%s: err %v hits %d, want a refusal and no request", c.name, err, f.count())
+		}
+	}
+}
+
+func TestExternalMessagesStageBudgetBounds(t *testing.T) {
+	s := func() *sys.Session { return extSession(t, "https://qwen.example.test") }
+	f := newExt(t, 503, 200)
+	b, err := provider.NewRequestBudget(provider.RequestBudgetLimits{MaxRequests: 2, MaxOutputTokens: 777}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extClient(f).Respond(context.Background(), s(), extRequest(extBase, b), nil); err != nil {
+		t.Fatalf("retry within budget: %v", err)
+	}
+	if f.count() != 2 || b.Snapshot().Reserved != 2 || !strings.Contains(f.hits[1].body, `"max_tokens":777`) || !strings.Contains(f.hits[0].body, `"max_tokens":777`) {
+		t.Fatalf("hits %d reserved %d, bodies must carry max_tokens 777 on every attempt: %v", f.count(), b.Snapshot().Reserved, f.hits)
+	}
+	_, err = extClient(f).Respond(context.Background(), s(), extRequest(extBase, b), nil)
+	if got := reason(t, err); got != "provider/request_budget_exhausted" || f.count() != 2 {
+		t.Fatalf("after exhaustion: %v hits %d", err, f.count())
+	}
+	g := newExt(t)
+	in, _ := provider.NewRequestBudget(provider.RequestBudgetLimits{MaxInputBytes: 10}, 0, nil)
+	_, err = extClient(g).Respond(context.Background(), s(), extRequest(extBase, in), nil)
+	if got := reason(t, err); got != "provider/request_budget_input_limit" || g.count() != 0 || in.Snapshot().Reserved != 0 {
+		t.Fatalf("input limit: %v hits %d", err, g.count())
+	}
+	dl, _ := provider.NewRequestBudget(provider.RequestBudgetLimits{Deadline: time.Now().Add(-time.Second)}, 0, nil)
+	_, err = extClient(g).Respond(context.Background(), s(), extRequest(extBase, dl), nil)
+	if got := reason(t, err); got != "provider/request_budget_deadline" || g.count() != 0 {
+		t.Fatalf("deadline: %v hits %d", err, g.count())
+	}
+	forced := extRequest(extBase, nil)
+	forced.Tools = []any{map[string]any{"name": "read_file", "description": "d", "parameters": map[string]any{"type": "object"}}}
+	forced.ToolChoice = "read_file"
+	_, err = extClient(g).Respond(context.Background(), s(), forced, nil)
+	if got := reason(t, err); got != "provider/unsupported_capability" || g.count() != 0 {
+		t.Fatalf("forced tool: %v hits %d", err, g.count())
+	}
+	chat := provider.Request{Role: provider.Role{Provider: "openai-compatible", Model: "m", BaseURL: g.srv.URL}, Input: []any{map[string]any{"role": "user", "content": "x"}}, Budget: b}
+	_, err = extClient(g).Respond(context.Background(), s(), chat, nil)
+	if got := reason(t, err); got != "provider/unsupported_capability" || g.count() != 0 {
+		t.Fatalf("generic Chat must keep refusing MaxOutputTokens: %v hits %d", err, g.count())
+	}
+}
+
+func TestExternalMessagesTwoTurnToolFixture(t *testing.T) {
+	f := newExt(t)
+	f.setTool(true)
+	s := extSession(t, "https://qwen.example.test")
+	req := extRequest(extBase, nil)
+	req.Tools = []any{map[string]any{"name": "read_file", "description": "d", "parameters": map[string]any{"type": "object"}}}
+	r1, err := extClient(f).Respond(context.Background(), s, req, nil)
+	if err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if r1.Model != "qwen-x" || r1.Usage.Input <= 0 || r1.Usage.Cached != 4 {
+		t.Fatalf("usage/model %+v %q", r1.Usage, r1.Model)
+	}
+	f.setTool(false)
+	in := append([]any{}, req.Input...)
+	for _, it := range r1.Items {
+		in = append(in, it)
+	}
+	req.Input = append(in, map[string]any{"type": "function_call_output", "call_id": "toolu_1", "output": "file text"})
+	if _, err := extClient(f).Respond(context.Background(), s, req, nil); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	second := f.hits[1].body
+	if f.count() != 2 || !strings.Contains(second, `"tool_use_id":"toolu_1"`) || !strings.Contains(second, `"id":"toolu_1"`) || f.hits[1].url != f.hits[0].url {
+		t.Fatalf("tool id/result or destination changed: %s", second)
+	}
+}
+
+func TestExternalMessagesFailuresStayVisible(t *testing.T) {
+	f := newExt(t, 429)
+	b, _ := provider.NewRequestBudget(provider.RequestBudgetLimits{MaxRequests: 1}, 0, nil)
+	var seen []map[string]any
+	obs := observerFunc(func(r map[string]any) { seen = append(seen, r) })
+	_, err := extClient(f).Respond(context.Background(), extSession(t, "https://qwen.example.test"), extRequest(extBase, b), obs)
+	if err == nil || f.count() != 1 || b.Snapshot().Reserved != 1 || len(seen) != 1 {
+		t.Fatalf("quota error must be an error with one counted visible attempt: %v hits %d reserved %d records %d", err, f.count(), b.Snapshot().Reserved, len(seen))
+	}
+}
+
+type observerFunc func(map[string]any)
+
+func (o observerFunc) Attempt(r map[string]any) { o(r) }
+
+func TestExternalMessagesRouteIsDeclaredExperimental(t *testing.T) {
+	info, ok := provider.Lookup(extName)
+	if !ok {
+		t.Fatalf("provider %s is not in the catalog", extName)
+	}
+	text := provider.OfficialText()
+	if info.Name != extName || !strings.Contains(text, extName) || !strings.Contains(strings.ToLower(text), "experimental") {
+		t.Fatalf("offline text must name %s as an experimental route: %s", extName, text)
+	}
+	if def, _ := provider.Lookup("anthropic"); def.APIBase != "https://api.anthropic.com" {
+		t.Fatalf("native Anthropic destination changed: %q", def.APIBase)
+	}
+	if p := provider.ResolveProfile(provider.Role{Provider: extName, Model: "qwen-x"}); p != nil {
+		t.Fatalf("no profile may qualify the external route: %+v", p)
+	}
+}

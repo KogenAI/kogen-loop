@@ -180,6 +180,16 @@ No request option controls parallel tool calls: the provider's own parallel-call
 - Support follows the effective wire and profile settings after profile resolution, exactly as rendering does. Current Anthropic Messages profiles use adaptive thinking, which does not permit a forced tool: `SupportsToolChoice` reports false. Unknown providers report false. A Messages profile with thinking disabled would encode `{"type":"tool","name":"submit"}`; none exists today.
 - An unsupported route refuses a nonempty `ToolChoice` in `Render` and `Respond` with `provider/unsupported_capability`, exit 4, a detail naming `ToolChoice` and the route (for example `Messages route anthropic`), before any credential lookup, network call or attempt record. It is never silently ignored or weakened.
 
+### Explicit experimental Messages route (`messages-compatible`)
+
+`messages-compatible` (label `Messages-compatible (experimental)`) is an explicit, experimental provider listed in `provider.Catalog()` and in `capabilities --json` providers. It is research plumbing: it adds no model, no default lineup change and no `kogen-loop run` task field or default; the stage `RequestBudget` stays library-only. The native `anthropic` provider (fixed destination, its own credential) and the generic `openai-compatible` Chat route keep their contracts, and the Chat route still refuses `MaxOutputTokens`.
+
+- **Destination.** The streamed Messages wire is sent only to the role's `base_url` (a trailing `/` trimmed) plus `/v1/messages`. There is no default destination and `KOGEN_PROVIDER_URL` is never used: a request with an empty `base_url`, or with `KOGEN_PROVIDER_URL` set, is refused with `provider/refused` before credentials are read and nothing is sent.
+- **Credential.** An API key is required (not optional) and origin-bound exactly as for openai-compatible: save it with `Client.LoginWithBaseURL` under the name `messages-compatible`; it is sent only when the request origin equals the saved HTTPS origin. A missing key, a key without an origin, a different origin or a plaintext origin sends nothing. The native `anthropic` key is never read for this route.
+- **Bounds.** The existing common request path applies unchanged: the stage `RequestBudget` bounds the request count, the deadline, the encoded-input bytes and the per-response `MaxOutputTokens`, carried as `max_tokens` (128000 lowered to a smaller `MaxOutputTokens`), on every attempt including retries; failed attempts count and stay visible. These are token and request bounds, never Credit or dollar guarantees. An absent cache count in the usage is zero in the total input.
+- **Unsupported.** No profile resolves, so the classification is `experimental`. Profiles for any model, forced `ToolChoice`/`RequireTool` (refused with `provider/unsupported_capability` by the adaptive-thinking rule, before dispatch), images, and an output bound on the Responses or Chat wires are unsupported.
+- **Status.** Only local fixtures tested this route. Live qualification and account debit reconciliation are still required before any claim. Token Plan unattended batches remain prohibited. The four QC studies stay draft, unregistered and held; this route gives no permission to run them.
+
 ### Cache breakpoints (fixed)
 
 The Messages wire (Anthropic) places three default cache breakpoints: the last tool, the system block and the newest message. Each is the default five-minute lifetime (`{"type":"ephemeral"}`, no explicit `ttl`). No request option adds, moves or removes one.
@@ -412,7 +422,7 @@ With `session.dir`, the loop writes `session.json` atomically (0600, directory 0
 ```json
 {
   "protocol": "kogen-loop/v1", "library": "loop/v1", "version": "<digest or dev label>",
-  "providers": ["chatgpt", "supergrok", "opencode-go", "anthropic", "openai-compatible"],
+  "providers": ["chatgpt", "supergrok", "opencode-go", "anthropic", "openai-compatible", "messages-compatible"],
   "tools": ["read_file", "write_file", "list_files", "search_text", "shell", "view_image", "documentation"],
   "terminal_default": ["finish"],
   "session_resume": "transcript",
