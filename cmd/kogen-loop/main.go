@@ -1,6 +1,7 @@
 // Command kogen-loop is the standalone process protocol of kogen-loop (contract kogen-loop/v1,
 // docs/contract/loop-v1.md): one task in, JSON Lines events out, an exit code.
 //
+//	kogen-loop --help
 //	kogen-loop capabilities --json
 //	kogen-loop version
 //	kogen-loop run --task FILE|-
@@ -47,6 +48,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return api.ExitInvalid
 	}
 	switch args[0] {
+	case "--help", "-h", "help":
+		if len(args) == 1 {
+			fmt.Fprintln(stdout, usage)
+			return 0
+		}
 	case "version":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, usage)

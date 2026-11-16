@@ -690,6 +690,21 @@ func TestCapabilitiesNeedNoNetworkOrCredentials(t *testing.T) {
 	}
 }
 
+func TestStandaloneHelp(t *testing.T) {
+	t.Parallel()
+	const usage = "usage: kogen-loop capabilities --json | version | run --task FILE|-\n"
+	for _, form := range []string{"--help", "-h", "help"} {
+		t.Run(form, func(t *testing.T) {
+			if out, code := runPlain(t, form); code != 0 || out != usage {
+				t.Errorf("standalone help: exit %d stdout %q, want exit 0 stdout %q", code, out, usage)
+			}
+			if out, code := runPlain(t, form, "extra"); code != 2 || out != "" {
+				t.Errorf("help with extra argument: exit %d stdout %q, want exit 2 and empty stdout", code, out)
+			}
+		})
+	}
+}
+
 func TestVersionAndUsage(t *testing.T) {
 	t.Parallel()
 	if out, code := runPlain(t, "version"); code != 0 || out != "kogen-loop dev\n" {

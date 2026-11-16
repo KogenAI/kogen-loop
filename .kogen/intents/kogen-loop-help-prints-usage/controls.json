@@ -1,0 +1,44 @@
+{
+  "correct": {
+    "files": {
+      "cmd/kogen-loop/main.go": {
+        "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -3,6 +3,7 @@\n //\n //\tkogen-loop capabilities --json\n //\tkogen-loop version\n+//\tkogen-loop --help | -h | help\n //\tkogen-loop run --task FILE|-\n //\n // A round ending is the model's claim, never proof that the work is done.\n@@ -47,6 +48,13 @@\n \t\treturn api.ExitInvalid\n \t}\n \tswitch args[0] {\n+\tcase \"--help\", \"-h\", \"help\":\n+\t\tif len(args) != 1 {\n+\t\t\tfmt.Fprintln(stderr, usage)\n+\t\t\treturn api.ExitInvalid\n+\t\t}\n+\t\tfmt.Fprintln(stdout, usage)\n+\t\treturn 0\n \tcase \"version\":\n \t\tif len(args) != 1 {\n \t\t\tfmt.Fprintln(stderr, usage)\n"
+      },
+      "conformance/process_test.go": {
+        "patch": "--- a/conformance/process_test.go\n+++ b/conformance/process_test.go\n@@ -705,3 +705,19 @@\n \tr := startCLI(t, w, nil, nil, \"run\").result()\n \texpectRefusal(t, r, nil, \"loop\", \"invalid_task\", 2)\n }\n+\n+// TestHelpAndUsage exercises standalone help and the adjacent invalid forms offline.\n+func TestHelpAndUsage(t *testing.T) {\n+\tt.Parallel()\n+\tconst usage = \"usage: kogen-loop capabilities --json | version | run --task FILE|-\\n\"\n+\tfor _, arg := range []string{\"--help\", \"-h\", \"help\"} {\n+\t\tt.Run(arg, func(t *testing.T) {\n+\t\t\tif out, code := runPlain(t, arg); code != 0 || out != usage {\n+\t\t\t\tt.Errorf(\"%s: exit %d stdout %q, want exit 0 stdout %q\", arg, code, out, usage)\n+\t\t\t}\n+\t\t\tif out, code := runPlain(t, arg, \"extra\"); code != 2 || out != \"\" {\n+\t\t\t\tt.Errorf(\"%s extra: exit %d stdout %q, want exit 2 and empty stdout\", arg, code, out)\n+\t\t\t}\n+\t\t})\n+\t}\n+}\n"
+      }
+    }
+  },
+  "wrong": [
+    {
+      "name": "Original invalid help dispatch",
+      "scenario": "Long help prints usage",
+      "step": "Then kogen-loop-help-prints-usage: the process result is exactly:",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -3,7 +3,6 @@\n //\n //\tkogen-loop capabilities --json\n //\tkogen-loop version\n-//\tkogen-loop --help | -h | help\n //\tkogen-loop run --task FILE|-\n //\n // A round ending is the model's claim, never proof that the work is done.\n@@ -48,13 +47,6 @@\n \t\treturn api.ExitInvalid\n \t}\n \tswitch args[0] {\n-\tcase \"--help\", \"-h\", \"help\":\n-\t\tif len(args) != 1 {\n-\t\t\tfmt.Fprintln(stderr, usage)\n-\t\t\treturn api.ExitInvalid\n-\t\t}\n-\t\tfmt.Fprintln(stdout, usage)\n-\t\treturn 0\n \tcase \"version\":\n \t\tif len(args) != 1 {\n \t\t\tfmt.Fprintln(stderr, usage)\n"
+        }
+      }
+    },
+    {
+      "name": "Only long help accepted",
+      "scenario": "Short help prints usage",
+      "step": "Then kogen-loop-help-prints-usage: the process result is exactly:",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -48,7 +48,7 @@\n \t\treturn api.ExitInvalid\n \t}\n \tswitch args[0] {\n-\tcase \"--help\", \"-h\", \"help\":\n+\tcase \"--help\":\n \t\tif len(args) != 1 {\n \t\t\tfmt.Fprintln(stderr, usage)\n \t\t\treturn api.ExitInvalid\n"
+        }
+      }
+    },
+    {
+      "name": "Help ignores trailing arguments",
+      "scenario": "Help with extra arguments stays invalid",
+      "step": "Then kogen-loop-help-prints-usage: the process result is exactly:",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -49,10 +49,6 @@\n \t}\n \tswitch args[0] {\n \tcase \"--help\", \"-h\", \"help\":\n-\t\tif len(args) != 1 {\n-\t\t\tfmt.Fprintln(stderr, usage)\n-\t\t\treturn api.ExitInvalid\n-\t\t}\n \t\tfmt.Fprintln(stdout, usage)\n \t\treturn 0\n \tcase \"version\":\n"
+        }
+      }
+    }
+  ]
+}
