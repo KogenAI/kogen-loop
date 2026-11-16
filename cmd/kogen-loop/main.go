@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,10 +82,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 const usage = "usage: kogen-loop capabilities --json | version | run --task FILE|-"
 
 // genericTools are the tools the standalone loop offers by name.
-var genericTools = []string{
-	tools.ReadFileTool, tools.WriteFileTool, tools.ListFilesTool, tools.SearchTextTool,
-	tools.ShellTool, tools.ViewImageTool, tools.DocumentationTool,
-}
+var genericTools = tools.Names()
 
 func capabilities() api.Capabilities {
 	var providers []string
@@ -306,8 +304,11 @@ func validateTask(t api.Task) (string, error) {
 	if t.Session.Resume && t.Session.Dir == "" {
 		return bad("session.resume needs session.dir")
 	}
+	if t.Role.Provider == "" {
+		return bad("role.provider is required; the providers are " + strings.Join(provider.Names(), ", "))
+	}
 	if _, ok := provider.Lookup(t.Role.Provider); !ok {
-		return bad("unknown provider " + t.Role.Provider)
+		return bad("unknown provider " + t.Role.Provider + "; the providers are " + strings.Join(provider.Names(), ", "))
 	}
 	return root, nil
 }
