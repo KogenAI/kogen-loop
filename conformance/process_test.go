@@ -787,3 +787,62 @@ func TestVersionAndUsage(t *testing.T) {
 	r := startCLI(t, w, nil, nil, "run").result()
 	expectRefusal(t, r, nil, "loop", "invalid_task", 2)
 }
+
+// expectRunDetail runs the built CLI and checks a refusal before any session: exit 2, the
+// invalid_task detail, a failed ending and no session.started event.
+func expectRunDetail(t *testing.T, w *world, stdin []byte, detail string, args ...string) {
+	t.Helper()
+	r := startCLI(t, w, nil, stdin, args...).result()
+	expectRefusal(t, r, nil, "loop", "invalid_task", 2)
+	if got := r.first("error")["detail"]; got != detail {
+		t.Errorf("%v: detail %q, want %q", args, got, detail)
+	}
+	if r.first("session.started") != nil {
+		t.Errorf("%v: a refused invocation started a session", args)
+	}
+}
+
+func TestRunWithoutATaskSaysWhatIsMissing(t *testing.T) {
+	t.Parallel()
+	const want = "run needs --task FILE|- (a task file, or - for standard input)"
+	expectRunDetail(t, newWorld(t), nil, want, "run")
+	expectRunDetail(t, newWorld(t), nil, want, "run", "--task", "")
+}
+
+func TestRunNamesTheExtraArgument(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	task := []byte(`{"protocol":"kogen-loop/v1","root":"` + w.root + `","prompt":"hello"}`)
+	f := newFakeProvider(t, nil)
+	r := startCLI(t, w, f, task, "run", "--task", "-", "extra").result()
+	expectRefusal(t, r, f, "loop", "invalid_task", 2)
+	if got, want := r.first("error")["detail"], `run takes no argument besides --task, got "extra"`; got != want {
+		t.Errorf("detail %q, want %q", got, want)
+	}
+	if r.first("session.started") != nil {
+		t.Error("a refused invocation started a session")
+	}
+}
+
+func TestRunFlagErrorIsTheDetail(t *testing.T) {
+	t.Parallel()
+	expectRunDetail(t, newWorld(t), nil, "flag provided but not defined: -bogus", "run", "--bogus")
+	expectRunDetail(t, newWorld(t), nil, "flag needs an argument: -task", "run", "--task")
+}
+
+func TestEmptyTaskOnStdinIsSaidToBeEmpty(t *testing.T) {
+	t.Parallel()
+	const empty = "the task read from standard input is empty"
+	expectRunDetail(t, newWorld(t), nil, empty, "run", "--task", "-")
+	expectRunDetail(t, newWorld(t), []byte("\n  \t\n"), empty, "run", "--task", "-")
+	expectRunDetail(t, newWorld(t), []byte("this is x\n"), "invalid task: expected one JSON object", "run", "--task", "-")
+}
+
+func TestEmptyTaskFileNamesTheFile(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	if err := os.WriteFile(filepath.Join(w.root, "empty-task.json"), []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectRunDetail(t, w, nil, "the task file empty-task.json is empty", "run", "--task", "empty-task.json")
+}
