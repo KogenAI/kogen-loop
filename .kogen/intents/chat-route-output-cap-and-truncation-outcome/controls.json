@@ -1,0 +1,1 @@
+{"deferred":"Acceptance runs real Go driver tests of the provider package against local fakes; the correct implementation edits chat.go, wire.go, budget.go comments and the existing chat_test.go length case, and the Build writes it."}

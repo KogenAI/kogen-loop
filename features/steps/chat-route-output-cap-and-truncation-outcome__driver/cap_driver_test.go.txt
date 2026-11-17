@@ -1,0 +1,184 @@
+package provider
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// Driver tests of the Chat route's output cap and length outcome. They use only the
+// package's existing test helpers and public behavior (Render, NewRequestBudget, Respond).
+
+var ccapCompatible = Role{Provider: "openai-compatible", Model: "m", Effort: "default", BaseURL: "http://127.0.0.1:1/v1"}
+
+func ccapRequest(role Role, b *RequestBudget) Request {
+	return Request{Role: role, Instructions: "p", Input: user("x"), Budget: b}
+}
+
+func ccapBudget(t *testing.T, l RequestBudgetLimits) *RequestBudget {
+	t.Helper()
+	b, err := NewRequestBudget(l, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func ccapKeys(body map[string]any) string {
+	var keys []string
+	for k := range body {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+func TestChatCapCeilingIsCarriedAsMaxTokens(t *testing.T) {
+	for _, role := range []Role{goRole, ccapCompatible} {
+		plain, err := (&Client{}).Render(ccapRequest(role, nil))
+		if err != nil {
+			t.Fatalf("%s: %v", role.Provider, err)
+		}
+		base := string(mustEncode(plain))
+		for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+			if _, has := plain[k]; has {
+				t.Fatalf("%s: a request without a ceiling carries %s: %s", role.Provider, k, base)
+			}
+		}
+		// a budget without an output ceiling renders exactly the same bytes
+		noCeiling, err := (&Client{}).Render(ccapRequest(role, ccapBudget(t, RequestBudgetLimits{MaxRequests: 3})))
+		if err != nil || string(mustEncode(noCeiling)) != base {
+			t.Fatalf("%s: budget without ceiling changed the body: %v\n%s\n%s", role.Provider, err, mustEncode(noCeiling), base)
+		}
+		for _, n := range []int{1, 4096, OutputReserveTokens} {
+			body, err := (&Client{}).Render(ccapRequest(role, ccapBudget(t, RequestBudgetLimits{MaxOutputTokens: n})))
+			if err != nil {
+				t.Fatalf("%s ceiling %d: %v", role.Provider, n, err)
+			}
+			if got := fmt.Sprint(body["max_tokens"]); got != fmt.Sprint(n) {
+				t.Fatalf("%s: max_tokens = %q, want %d: %s", role.Provider, got, n, mustEncode(body))
+			}
+			delete(body, "max_tokens")
+			if string(mustEncode(body)) != base {
+				t.Fatalf("%s ceiling %d: the body differs from the no-ceiling body beyond max_tokens:\n%s\n%s", role.Provider, n, mustEncode(body), base)
+			}
+		}
+	}
+	want := "messages,model,reasoning_effort,store,stream"
+	plain, _ := (&Client{}).Render(ccapRequest(goRole, nil))
+	if ccapKeys(plain) != want {
+		t.Fatalf("no-ceiling body keys = %s, want %s", ccapKeys(plain), want)
+	}
+	// the ceiling reaches the wire of Respond, on every attempt
+	e, f := keyEnv(t, "opencode-go", jsonAnswer(503, map[string]any{}), textHandlerGo("ok"))
+	b := ccapBudget(t, RequestBudgetLimits{MaxOutputTokens: 4096})
+	if _, err := e.c.Respond(context.Background(), e.s, ccapRequest(goRole, b), nil); err != nil {
+		t.Fatal(err)
+	}
+	reqs := f.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("%d requests, want 2", len(reqs))
+	}
+	for i, r := range reqs {
+		if !strings.Contains(string(r.Body), `"max_tokens":4096`) {
+			t.Fatalf("attempt %d body lacks max_tokens 4096: %s", i, r.Body)
+		}
+	}
+}
+
+func TestChatCapCeilingAboveReserveIsRejected(t *testing.T) {
+	if _, err := NewRequestBudget(RequestBudgetLimits{MaxOutputTokens: OutputReserveTokens}, 0, nil); err != nil {
+		t.Fatalf("a ceiling equal to the reserve must be accepted: %v", err)
+	}
+	for _, n := range []int{OutputReserveTokens + 1, -1} {
+		b, err := NewRequestBudget(RequestBudgetLimits{MaxOutputTokens: n}, 0, nil)
+		if err == nil || b != nil {
+			t.Fatalf("ceiling %d must be rejected, got %v %v", n, b, err)
+		}
+		if se := mustErr(t, err); se.Reason != "invalid_request_budget" {
+			t.Fatalf("ceiling %d: reason %q", n, se.Reason)
+		}
+	}
+}
+
+func TestChatCapLengthIsANamedRetryableOutcome(t *testing.T) {
+	usage := map[string]any{"prompt_tokens": 100, "completion_tokens": 4096}
+	partial := map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{goCall("a")}}
+	text := map[string]any{"role": "assistant", "content": "partial answer"}
+	for name, raw := range map[string]map[string]any{"partial tool call": partial, "cut text": text} {
+		cut := func() handler { return jsonAnswer(200, goAnswer(raw, "length", "usage", usage)) }
+		// the existing retry policy of a keyed provider: three attempts, then unavailable
+		e, f := keyEnv(t, "opencode-go", cut(), cut(), cut(), textHandlerGo("never"))
+		resp, err := e.c.Respond(context.Background(), e.s, Request{Role: goRole, Instructions: "p", Input: user("x")}, nil)
+		if resp != nil || err == nil {
+			t.Fatalf("%s: a cut answer must not be a response: %+v %v", name, resp, err)
+		}
+		se := mustErr(t, err)
+		if se.Reason == "invalid_response" || se.Reason != "unavailable" || len(f.requests()) != 3 {
+			t.Fatalf("%s: reason %q, %d requests: %v", name, se.Reason, len(f.requests()), se)
+		}
+		all := se.Detail + "|" + strings.Join(se.Lines, "|") + "|" + se.Error()
+		if !strings.Contains(se.Detail, "output cut at the length limit") || !strings.Contains(se.Detail, "finish_reason length") {
+			t.Fatalf("%s: detail does not name the cut: %q", name, se.Detail)
+		}
+		for _, secret := range []string{testKey, f.srv.URL} {
+			if secret != "" && strings.Contains(all, secret) {
+				t.Fatalf("%s: the error leaks %q: %s", name, secret, all)
+			}
+		}
+	}
+	// a cut answer then a good one: retried by the existing policy, the partial call is never an item
+	e, f := keyEnv(t, "opencode-go", jsonAnswer(200, goAnswer(partial, "length", "usage", usage)), textHandlerGo("complete"))
+	obs := &observer{}
+	resp, err := e.c.Respond(context.Background(), e.s, Request{Role: goRole, Instructions: "p", Input: user("x")}, obs)
+	if err != nil || resp == nil || len(f.requests()) != 2 {
+		t.Fatalf("%v, %d requests", err, len(f.requests()))
+	}
+	for _, it := range resp.Items {
+		if it["type"] == "function_call" {
+			t.Fatalf("a partial tool call was returned: %v", resp.Items)
+		}
+	}
+	recs := obs.records()
+	if len(recs) != 2 || recs[0]["outcome"] != "failed" || recs[0]["usage_state"] == "unknown" || !strings.Contains(jsonOf(t, recs[0]["usage"]), "4096") {
+		t.Fatalf("the cut attempt must keep the reported usage: %s", jsonOf(t, recs))
+	}
+	// stop and tool_calls finishes are not affected
+	ok := map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{goCall("a")}}
+	e, _ = keyEnv(t, "opencode-go", jsonAnswer(200, goAnswer(ok, "tool_calls")))
+	resp, err = e.c.Respond(context.Background(), e.s, Request{Role: goRole, Instructions: "p", Input: user("x")}, nil)
+	if err != nil || resp == nil || len(resp.Items) != 2 {
+		t.Fatalf("tool_calls finish: %+v %v", resp, err)
+	}
+}
+
+func TestChatCapOtherWiresKeepTheirBehaviour(t *testing.T) {
+	b := ccapBudget(t, RequestBudgetLimits{MaxOutputTokens: 777})
+	// Responses still refuses an output limit before anything is sent
+	responses := Role{Provider: "chatgpt", Model: "gpt-6.1-sol", Effort: "high"}
+	body, err := (&Client{}).Render(ccapRequest(responses, b))
+	if err == nil || mustErr(t, err).Reason != "unsupported_capability" || body != nil {
+		t.Fatalf("Responses must refuse MaxOutputTokens: %v %v", body, err)
+	}
+	plain, err := (&Client{}).Render(ccapRequest(responses, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range plain {
+		if strings.Contains(k, "max") {
+			t.Fatalf("Responses body gained %s", k)
+		}
+	}
+	// Messages still carries the ceiling as max_tokens, lowering its larger default
+	messages := Role{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}
+	body, err = (&Client{}).Render(ccapRequest(messages, b))
+	if err != nil || fmt.Sprint(body["max_tokens"]) != "777" {
+		t.Fatalf("Messages must carry max_tokens 777: %v %v", body, err)
+	}
+	free, err := (&Client{}).Render(ccapRequest(messages, nil))
+	if err != nil || fmt.Sprint(free["max_tokens"]) == "777" || free["max_tokens"] == nil {
+		t.Fatalf("Messages without a ceiling keeps its own max_tokens: %v %v", free, err)
+	}
+}
