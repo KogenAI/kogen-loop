@@ -480,8 +480,12 @@ func (s *messageState) result() result {
 			valid = valid && hasInput && isObj && validName(b["id"]) && validName(b["name"]) && !blank(b["id"]) && !blank(b["name"])
 		case "thinking":
 			_, okT := b["thinking"].(string)
-			sig, okS := b["signature"].(string)
-			valid = valid && okT && okS && sig != ""
+			rawSig, hasSig := b["signature"]
+			sig, okS := rawSig.(string)
+			// An external route may return unsigned thinking: signature absent or empty.
+			signed := okS && sig != ""
+			unsigned := s.external && (!hasSig || (okS && sig == ""))
+			valid = valid && okT && (signed || unsigned)
 		case "redacted_thinking":
 			_, ok := b["data"].(string)
 			valid = valid && ok

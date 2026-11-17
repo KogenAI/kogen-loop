@@ -1,0 +1,415 @@
+package provider_test
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+const utBase = "https://qwen.example.test/compatible-mode"
+const utThinking = "I should look at the workspace first, then read the file. Plan: list, read."
+
+type utHit struct{ url, body string }
+
+type utFake struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	hits   []utHit
+	script []string // response stream per request; the last one repeats
+}
+
+func utSSE(name, data string) string { return "event: " + name + "\ndata: " + data + "\n\n" }
+
+func utJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func utStart() string {
+	return utSSE("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"qwen-x","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}`)
+}
+
+func utStop(reason string) string {
+	return utSSE("message_delta", `{"type":"message_delta","delta":{"stop_reason":"`+reason+`"},"usage":{"output_tokens":5}}`) + utSSE("message_stop", `{"type":"message_stop"}`)
+}
+
+// utThink is a thinking block as the provider streams it: a start block (carrying the
+// signature, possibly empty or absent), one thinking_delta and a stop.
+func utThink(i int, text string, startBlock map[string]any) string {
+	return utSSE("content_block_start", utJSON(map[string]any{"type": "content_block_start", "index": i, "content_block": startBlock})) +
+		utSSE("content_block_delta", utJSON(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "thinking_delta", "thinking": text}})) +
+		utSSE("content_block_stop", utJSON(map[string]any{"type": "content_block_stop", "index": i}))
+}
+
+func utTool(i int, id, name, input string) string {
+	return utSSE("content_block_start", utJSON(map[string]any{"type": "content_block_start", "index": i, "content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}}})) +
+		utSSE("content_block_delta", utJSON(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "input_json_delta", "partial_json": input}})) +
+		utSSE("content_block_stop", `{"type":"content_block_stop","index":`+utJSON(i)+`}`)
+}
+
+func utText(i int, text string) string {
+	return utSSE("content_block_start", utJSON(map[string]any{"type": "content_block_start", "index": i, "content_block": map[string]any{"type": "text", "text": ""}})) +
+		utSSE("content_block_delta", utJSON(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "text_delta", "text": text}})) +
+		utSSE("content_block_stop", `{"type":"content_block_stop","index":`+utJSON(i)+`}`)
+}
+
+// utRecorded is the shape of the observed stream: HTTP 200, a thinking block with an empty
+// signature, a read_file and a list_files tool_use, stop_reason tool_use.
+func utRecorded(sig any, hasSig bool) string {
+	b := map[string]any{"type": "thinking", "thinking": ""}
+	if hasSig {
+		b["signature"] = sig
+	}
+	return utStart() + utThink(0, utThinking, b) +
+		utTool(1, "toolu_read", "read_file", `{"path":"note.txt"}`) +
+		utTool(2, "toolu_list", "list_files", `{"path":"."}`) + utStop("tool_use")
+}
+
+func utFinal() string { return utStart() + utText(0, "all done") + utStop("end_turn") }
+
+func utNew(t *testing.T, script ...string) *utFake {
+	f := &utFake{script: script}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.hits = append(f.hits, utHit{url: r.Header.Get("X-Orig-URL"), body: string(data)})
+		n := len(f.hits) - 1
+		if n >= len(f.script) {
+			n = len(f.script) - 1
+		}
+		body := f.script[n]
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *utFake) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.hits) }
+
+type utReroute struct{ f *utFake }
+
+func (r utReroute) RoundTrip(req *http.Request) (*http.Response, error) {
+	c := req.Clone(req.Context())
+	c.Header.Set("X-Orig-URL", req.URL.String())
+	u := *req.URL
+	u.Scheme, u.Host = "http", strings.TrimPrefix(r.f.srv.URL, "http://")
+	c.URL = &u
+	return http.DefaultTransport.RoundTrip(c)
+}
+
+func utClient(f *utFake) *provider.Client {
+	return &provider.Client{HTTP: &http.Client{Transport: utReroute{f}}, Cache: provider.NewCache(nil),
+		Sleep: func(ctx context.Context, d time.Duration) error { return nil }}
+}
+
+func utSession(t *testing.T) *sys.Session {
+	home := t.TempDir()
+	save := func(name, body string) {
+		p := filepath.Join(home, ".kogen", "credentials", name+".json")
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("messages-compatible", `{"provider":"messages-compatible","api_key":"fake-ext-key","origin":"https://qwen.example.test"}`)
+	save("anthropic", `{"provider":"anthropic","api_key":"fake-native-key"}`)
+	return sys.NewWith([]string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}, home)
+}
+
+func utRequest(strict bool, input []any) provider.Request {
+	role := provider.Role{Provider: "messages-compatible", Model: "qwen-x", Effort: "high", BaseURL: utBase}
+	if strict {
+		role = provider.Role{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}
+	}
+	if input == nil {
+		input = []any{map[string]any{"role": "user", "content": "do it"}}
+	}
+	tools := []any{
+		map[string]any{"name": "read_file", "description": "d", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"name": "list_files", "description": "d", "parameters": map[string]any{"type": "object"}},
+	}
+	return provider.Request{Role: role, Instructions: "policy", Input: input, Tools: tools}
+}
+
+func utRespond(t *testing.T, f *utFake, strict bool, input []any) (*provider.Response, error) {
+	t.Helper()
+	return utClient(f).Respond(context.Background(), utSession(t), utRequest(strict, input), nil)
+}
+
+func utCallIDs(r *provider.Response) []string {
+	var ids []string
+	if r == nil {
+		return nil
+	}
+	for _, m := range r.Items {
+		if m["type"] == "function_call" {
+			ids = append(ids, m["call_id"].(string))
+		}
+	}
+	return ids
+}
+
+func utItems(r *provider.Response) int {
+	if r == nil {
+		return 0
+	}
+	return len(r.Items)
+}
+
+func utItemsOf(r *provider.Response) any {
+	if r == nil {
+		return nil
+	}
+	return r.Items
+}
+
+func utReason(t *testing.T, err error) string {
+	t.Helper()
+	e, ok := err.(*sys.Error)
+	if !ok {
+		t.Fatalf("want *sys.Error, got %T %v", err, err)
+	}
+	return e.Class + "/" + e.Reason
+}
+
+// utAssistantBlocks returns the content blocks of the first assistant message of a request body.
+func utAssistantBlocks(t *testing.T, body string) []any {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range req.Messages {
+		if m.Role == "assistant" {
+			if l, ok := m.Content.([]any); ok {
+				return l
+			}
+		}
+	}
+	t.Fatalf("no assistant blocks in %s", body)
+	return nil
+}
+
+func TestUTRecordedExternalResponseIsAccepted(t *testing.T) {
+	f := utNew(t, utRecorded("", true))
+	r, err := utRespond(t, f, false, nil)
+	if err != nil {
+		t.Fatalf("recorded unsigned response rejected: %v", err)
+	}
+	if got := utCallIDs(r); !reflect.DeepEqual(got, []string{"toolu_read", "toolu_list"}) {
+		t.Fatalf("tool ids = %v", got)
+	}
+	if f.count() != 1 {
+		t.Fatalf("requests = %d", f.count())
+	}
+}
+
+func TestUTAbsentSignatureIsUnsignedAndBadTypesStayInvalid(t *testing.T) {
+	r, err := utRespond(t, utNew(t, utRecorded(nil, false)), false, nil)
+	if err != nil || !reflect.DeepEqual(utCallIDs(r), []string{"toolu_read", "toolu_list"}) {
+		t.Fatalf("absent signature must be accepted as unsigned: %v %v", err, utCallIDs(r))
+	}
+	for name, stream := range map[string]string{
+		"numeric signature": utRecorded(123, true),
+		"null signature":    utRecorded(nil, true),
+		"object signature":  utRecorded(map[string]any{"a": 1}, true),
+		"non-string thinking": utStart() + utSSE("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":7,"signature":""}}`) +
+			utSSE("content_block_stop", `{"type":"content_block_stop","index":0}`) + utTool(1, "toolu_read", "read_file", `{"path":"a"}`) + utStop("tool_use"),
+	} {
+		f := utNew(t, stream)
+		r, err := utRespond(t, f, false, nil)
+		if err == nil || utItems(r) != 0 || utReason(t, err) != "provider/invalid_response" {
+			t.Fatalf("%s: want provider/invalid_response with no items, got %v %v", name, err, utItemsOf(r))
+		}
+	}
+}
+
+func TestUTExternalToolCycleKeepsProviderThinking(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("NOTE-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := utNew(t, utRecorded("", true), utFinal())
+	c, s := utClient(f), utSession(t)
+	req := utRequest(false, nil)
+	r1, err := c.Respond(context.Background(), s, req, nil)
+	if err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	executed := map[string]string{}
+	input := append([]any{}, req.Input...)
+	for _, it := range r1.Items {
+		input = append(input, it)
+	}
+	for _, m := range r1.Items {
+		if m["type"] != "function_call" {
+			continue
+		}
+		var out string
+		switch m["name"] {
+		case "read_file":
+			b, err := os.ReadFile(filepath.Join(dir, "note.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = string(b)
+		case "list_files":
+			es, _ := os.ReadDir(dir)
+			for _, e := range es {
+				out += e.Name() + "\n"
+			}
+		}
+		executed[m["call_id"].(string)] = out
+		input = append(input, map[string]any{"type": "function_call_output", "call_id": m["call_id"], "output": out})
+	}
+	if len(executed) != 2 {
+		t.Fatalf("executed %v", executed)
+	}
+	req.Input = input
+	r2, err := c.Respond(context.Background(), s, req, nil)
+	if err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	if f.count() != 2 || f.hits[0].url != f.hits[1].url || !strings.Contains(f.hits[1].url, "qwen.example.test/compatible-mode/v1/messages") {
+		t.Fatalf("hits %+v", f.hits)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(f.hits[1].body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["model"] != "qwen-x" || !reflect.DeepEqual(body["thinking"], map[string]any{"type": "adaptive"}) {
+		t.Fatalf("model/thinking settings changed: %v %v", body["model"], body["thinking"])
+	}
+	blocks := utAssistantBlocks(t, f.hits[1].body)
+	th, _ := blocks[0].(map[string]any)
+	if len(blocks) != 3 || th["type"] != "thinking" || th["thinking"] != utThinking {
+		t.Fatalf("original thinking not preserved: %v", blocks)
+	}
+	if sig, has := th["signature"]; has && sig != "" {
+		t.Fatalf("a signature was invented: %v", sig)
+	}
+	var results []any
+	for _, m := range body["messages"].([]any) {
+		mm := m.(map[string]any)
+		if mm["role"] == "user" {
+			if l, ok := mm["content"].([]any); ok {
+				if first, _ := l[0].(map[string]any); first["type"] == "tool_result" {
+					results = l
+				}
+			}
+		}
+	}
+	if len(results) != 2 {
+		t.Fatalf("tool results = %v", results)
+	}
+	for i, id := range []string{"toolu_read", "toolu_list"} {
+		tr := results[i].(map[string]any)
+		if tr["tool_use_id"] != id || tr["content"] != executed[id] {
+			t.Fatalf("result %d = %v want id %s content %q", i, tr, id, executed[id])
+		}
+	}
+	if len(utCallIDs(r2)) != 0 || !strings.Contains(utJSON(r2.Items), "all done") {
+		t.Fatalf("final completion = %v", r2.Items)
+	}
+}
+
+func TestUTStrictAnthropicStillRequiresSignature(t *testing.T) {
+	f := utNew(t, utRecorded("", true))
+	r, err := utRespond(t, f, true, nil)
+	if err == nil || utItems(r) != 0 || utReason(t, err) != "provider/invalid_response" || f.count() != 1 {
+		t.Fatalf("strict route must reject unsigned thinking once: %v %v hits %d", err, utItemsOf(r), f.count())
+	}
+	f = utNew(t, utRecorded(nil, false))
+	if _, err := utRespond(t, f, true, nil); err == nil || utReason(t, err) != "provider/invalid_response" {
+		t.Fatalf("strict route must reject absent signature: %v", err)
+	}
+	// signed thinking is accepted and replayed unchanged on the strict route
+	f = utNew(t, utRecorded("sig-abc", true), utFinal())
+	c, s := utClient(f), utSession(t)
+	req := utRequest(true, nil)
+	r1, err := c.Respond(context.Background(), s, req, nil)
+	if err != nil || !reflect.DeepEqual(utCallIDs(r1), []string{"toolu_read", "toolu_list"}) {
+		t.Fatalf("signed response: %v %v", err, utCallIDs(r1))
+	}
+	in := append([]any{}, req.Input...)
+	for _, it := range r1.Items {
+		in = append(in, it)
+	}
+	for _, id := range []string{"toolu_read", "toolu_list"} {
+		in = append(in, map[string]any{"type": "function_call_output", "call_id": id, "output": "x"})
+	}
+	req.Input = in
+	if _, err := c.Respond(context.Background(), s, req, nil); err != nil {
+		t.Fatal(err)
+	}
+	th, _ := utAssistantBlocks(t, f.hits[1].body)[0].(map[string]any)
+	if th["thinking"] != utThinking || th["signature"] != "sig-abc" {
+		t.Fatalf("signed thinking not replayed unchanged: %v", th)
+	}
+}
+
+func TestUTMalformedOrDuplicateToolsRejectWholeResponse(t *testing.T) {
+	think := map[string]any{"type": "thinking", "thinking": "", "signature": ""}
+	for name, stream := range map[string]string{
+		"non-object input": utStart() + utThink(0, utThinking, think) + utTool(1, "toolu_read", "read_file", `{"path":"a"}`) + utTool(2, "toolu_list", "list_files", `["bad"]`) + utStop("tool_use"),
+		"duplicate id":     utStart() + utThink(0, utThinking, think) + utTool(1, "toolu_same", "read_file", `{"path":"a"}`) + utTool(2, "toolu_same", "list_files", `{"path":"."}`) + utStop("tool_use"),
+		"blank name":       utStart() + utThink(0, utThinking, think) + utTool(1, "toolu_read", "read_file", `{"path":"a"}`) + utTool(2, "toolu_list", " ", `{}`) + utStop("tool_use"),
+	} {
+		f := utNew(t, stream)
+		r, err := utRespond(t, f, false, nil)
+		if err == nil || utItems(r) != 0 || utReason(t, err) != "provider/invalid_response" {
+			t.Fatalf("%s: want whole-response rejection, got %v %v", name, err, utItemsOf(r))
+		}
+	}
+}
+
+func TestUTCutStreamAndStopHandlingUnchanged(t *testing.T) {
+	cut := strings.TrimSuffix(utRecorded("", true), utStop("tool_use")) // no message_stop
+	for _, strict := range []bool{false, true} {
+		f := utNew(t, cut)
+		_, err := utRespond(t, f, strict, nil)
+		if err == nil || utReason(t, err) != "provider/unavailable" || f.count() != 3 {
+			t.Fatalf("strict=%v: a cut stream stays transient (3 attempts, unavailable): %v hits %d", strict, err, f.count())
+		}
+	}
+	// an invalid stop stays invalid on both routes
+	signed := map[string]any{"type": "thinking", "thinking": "t", "signature": "sig"}
+	for _, strict := range []bool{false, true} {
+		f := utNew(t, utStart()+utThink(0, "t", signed)+utTool(1, "toolu_read", "read_file", `{}`)+utStop("max_tokens"))
+		if _, err := utRespond(t, f, strict, nil); err == nil || utReason(t, err) != "provider/invalid_response" || f.count() != 1 {
+			t.Fatalf("strict=%v invalid stop: %v hits %d", strict, err, f.count())
+		}
+	}
+	f := utNew(t, strings.Replace(utRecorded("", true), `"stop_reason":"tool_use"`, `"stop_reason":"max_tokens"`, 1))
+	if _, err := utRespond(t, f, false, nil); err == nil || utReason(t, err) != "provider/invalid_response" || f.count() != 1 {
+		t.Fatalf("external unsigned with invalid stop: %v hits %d", err, f.count())
+	}
+	// usage: the external route still infers a total from absent cache counts; the strict route does not
+	signedOK := utStart() + utThink(0, "t", signed) + utText(1, "ok") + utStop("end_turn")
+	re, err := utRespond(t, utNew(t, signedOK), false, nil)
+	if err != nil || re.Usage.Input != 10 {
+		t.Fatalf("external usage input = %v err %v", re, err)
+	}
+	rs, err := utRespond(t, utNew(t, signedOK), true, nil)
+	if err != nil || rs.Usage.Input != 0 {
+		t.Fatalf("strict usage input = %v err %v", rs, err)
+	}
+}
