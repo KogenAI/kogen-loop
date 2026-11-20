@@ -1,0 +1,124 @@
+package loop
+
+// Independent acceptance collector injected by Go's overlay. Kept as text so ordinary
+// module tests do not register it as product code. It runs a real Session round against a
+// local fake openai-compatible provider and prints one LPTTOBS line.
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/api"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
+)
+
+type lpttTurn struct {
+	Provider int   `json:"provider"`
+	Calls    []int `json:"calls"`
+}
+type lpttConfig struct {
+	Clock string     `json:"clock"`
+	Turns []lpttTurn `json:"turns"`
+}
+type lpttClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *lpttClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *lpttClock) advance(ms int) {
+	c.mu.Lock()
+	c.t = c.t.Add(time.Duration(ms) * time.Millisecond)
+	c.mu.Unlock()
+}
+
+func TestLoopPerTurnTimingAcceptance(t *testing.T) {
+	var cfg lpttConfig
+	if err := json.Unmarshal([]byte(os.Getenv("LPTT_CONFIG")), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	clock := &lpttClock{t: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)}
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		i := n
+		n++
+		mu.Unlock()
+		if i >= len(cfg.Turns) {
+			i = len(cfg.Turns) - 1
+		}
+		turn := cfg.Turns[i]
+		clock.advance(turn.Provider)
+		var parts []string
+		for j, ms := range turn.Calls {
+			parts = append(parts, fmt.Sprintf(`{"id":"t%dc%d","type":"function","function":{"name":"probe","arguments":"{\"command\":\"%d\"}"}}`, i, j, ms))
+		}
+		if len(turn.Calls) == 0 {
+			parts = append(parts, fmt.Sprintf(`{"id":"t%dfin","type":"function","function":{"name":"finish","arguments":"{\"summary\":\"done\"}"}}`, i))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[%s]},"finish_reason":"tool_calls"}]}`, strings.Join(parts, ","))
+	}))
+	defer srv.Close()
+	root := t.TempDir()
+	var events []api.Event
+	s, err := NewSession(SessionConfig{
+		Root: root, Role: provider.Role{Provider: "openai-compatible", Model: "local", BaseURL: srv.URL},
+		Session: sys.NewWith([]string{"HOME=" + t.TempDir(), "PATH=" + os.Getenv("PATH")}, root),
+		Emit:    func(e api.Event) { events = append(events, e) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Clock == "injected" {
+		s.tools.Now = clock.now
+	}
+	s.tools.Enabled = append(s.tools.Enabled, tools.ProbeTool)
+	s.tools.Probe = func(command string, _ any) (string, error) {
+		var ms int
+		fmt.Sscan(command, &ms)
+		clock.advance(ms)
+		return "probe ran " + command + " ms", nil
+	}
+	before := clock.now()
+	res, err := s.Round(context.Background(), "go")
+	wall := clock.now().Sub(before).Milliseconds()
+	obs := map[string]any{"ending": string(res.Ending), "wall_ms": wall, "err": fmt.Sprint(err)}
+	var responses, results []map[string]any
+	for _, e := range events {
+		raw, merr := json.Marshal(e)
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatal(err)
+		}
+		switch e.Type {
+		case api.EventResponse:
+			v, present := e.Fields["model_ms"]
+			responses = append(responses, map[string]any{"present": present, "go_type": fmt.Sprintf("%T", v), "value": fmt.Sprint(v), "json": fmt.Sprint(m["model_ms"])})
+		case api.EventToolResult:
+			v := e.Fields["elapsed_ms"]
+			results = append(results, map[string]any{"call_id": e.Fields["call_id"], "name": e.Fields["name"], "go_type": fmt.Sprintf("%T", v), "value": fmt.Sprint(v)})
+		}
+	}
+	obs["responses"], obs["results"] = responses, results
+	b, _ := json.Marshal(obs)
+	fmt.Printf("LPTTOBS %s\n", b)
+}
