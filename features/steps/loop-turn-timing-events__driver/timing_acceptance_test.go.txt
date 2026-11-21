@@ -1,0 +1,264 @@
+package loop
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/api"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+// ttClock is the injected clock of Client.Now and Tools.Now. The shell call announced by a
+// tool.call event runs for its stated duration: the call's second tools-clock read applies
+// it. An overlapping call first rewinds the clock to the start of the previous call, so the
+// two calls cover the same interval on the clock.
+type ttClock struct {
+	mu                      sync.Mutex
+	t, lastStart            time.Time
+	armed                   time.Duration
+	reads                   int
+	clientReads, toolsReads int
+}
+
+func (c *ttClock) toolsNow() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.toolsReads++
+	if c.armed > 0 {
+		c.reads++
+		if c.reads == 2 {
+			c.t = c.t.Add(c.armed)
+			c.armed = 0
+		}
+	}
+	return c.t
+}
+func (c *ttClock) clientNow() time.Time { c.mu.Lock(); defer c.mu.Unlock(); c.clientReads++; return c.t }
+func (c *ttClock) advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+func (c *ttClock) arm(d time.Duration, overlap bool) {
+	c.mu.Lock()
+	if overlap {
+		c.t = c.lastStart
+	}
+	c.lastStart = c.t
+	c.armed, c.reads = d, 0
+	c.mu.Unlock()
+}
+
+type ttShell struct {
+	ms      int
+	overlap bool // runs over the same interval as the call before it
+}
+
+type ttTurn struct {
+	failAfter  time.Duration // the first attempt fails with a 503 after this long (0: none)
+	retryAfter string
+	provider   time.Duration
+	shells     []ttShell // none: the finish call
+}
+
+type ttRecord struct {
+	events                  []api.Event
+	clientReads, toolsReads []int // snapshots at each request.started and at round.ended
+}
+
+func ttRun(t *testing.T, turns []ttTurn) ttRecord {
+	t.Helper()
+	clock := &ttClock{t: time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)}
+	var mu sync.Mutex
+	n, failed := 0, map[int]bool{}
+	calls := map[string]ttShell{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		i := n
+		if turns[i].failAfter > 0 && !failed[i] {
+			failed[i] = true
+			clock.advance(turns[i].failAfter)
+			if turns[i].retryAfter != "" {
+				w.Header().Set("Retry-After", turns[i].retryAfter)
+			}
+			w.WriteHeader(503)
+			fmt.Fprint(w, `{"error":"busy"}`)
+			return
+		}
+		n++
+		clock.advance(turns[i].provider)
+		call := fmt.Sprintf(`{"id":"t%dfin","type":"function","function":{"name":"finish","arguments":"{\"summary\":\"done\"}"}}`, i)
+		if len(turns[i].shells) > 0 {
+			call = ""
+			for j, sh := range turns[i].shells {
+				id := fmt.Sprintf("t%dc%d", i, j)
+				calls[id] = sh
+				if call != "" {
+					call += ","
+				}
+				call += fmt.Sprintf(`{"id":%q,"type":"function","function":{"name":"shell","arguments":"{\"command\":\"true\"}"}}`, id)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[%s]},"finish_reason":"tool_calls"}]}`, call)
+	}))
+	defer srv.Close()
+	root := t.TempDir()
+	var rec ttRecord
+	snap := func() {
+		clock.mu.Lock()
+		rec.clientReads = append(rec.clientReads, clock.clientReads)
+		rec.toolsReads = append(rec.toolsReads, clock.toolsReads)
+		clock.mu.Unlock()
+	}
+	client := provider.NewClient("timing test")
+	client.Now = clock.clientNow
+	client.Sleep = func(ctx context.Context, d time.Duration) error { clock.advance(d); return nil }
+	s, err := NewSession(SessionConfig{
+		Root: root, Role: provider.Role{Provider: "openai-compatible", Model: "local", BaseURL: srv.URL},
+		Client: client, Session: sys.NewWith([]string{"HOME=" + t.TempDir(), "PATH=" + os.Getenv("PATH")}, root),
+		Emit: func(e api.Event) {
+			rec.events = append(rec.events, e)
+			switch e.Type {
+			case api.EventRequestStarted:
+				snap()
+			case api.EventRoundEnded:
+				snap()
+			case api.EventToolCall:
+				mu.Lock()
+				sh := calls[fmt.Sprint(e.Fields["call_id"])]
+				mu.Unlock()
+				clock.arm(time.Duration(sh.ms)*time.Millisecond, sh.overlap)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tools.Now = clock.toolsNow
+	res, err := s.Round(context.Background(), "go")
+	if err != nil || res.Ending != EndTerminal {
+		t.Fatalf("%+v %v", res, err)
+	}
+	return rec
+}
+
+// ttTimings are the turn.timing events' fields; each one must be followed by the next turn's
+// request.started or, after the last turn, by round.ended, the first event after the last turn.
+func ttTimings(t *testing.T, events []api.Event) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for i, e := range events {
+		if e.Type != "turn.timing" {
+			continue
+		}
+		out = append(out, e.Fields)
+		if i+1 >= len(events) || (events[i+1].Type != api.EventRequestStarted && events[i+1].Type != api.EventRoundEnded) {
+			t.Errorf("turn.timing %d is not last in its turn", len(out))
+		}
+	}
+	return out
+}
+
+func ttInt(t *testing.T, f map[string]any, k string) int64 {
+	t.Helper()
+	v, ok := f[k].(int64)
+	if !ok {
+		t.Fatalf("%s is %T %v in %v", k, f[k], f[k], f)
+	}
+	return v
+}
+
+func ttShellMS(t *testing.T, f map[string]any, want int64) {
+	t.Helper()
+	m, ok := f["tool_ms"].(map[string]int64)
+	if !ok || len(m) != 1 || m["shell"] != want {
+		t.Errorf("tool_ms %#v, want only shell %d", f["tool_ms"], want)
+	}
+}
+
+func TestTurnTimingSplitAcceptance(t *testing.T) {
+	rec := ttRun(t, []ttTurn{
+		{provider: 300 * time.Millisecond, shells: []ttShell{{200, false}}},
+		{provider: 100 * time.Millisecond, shells: []ttShell{{300, false}, {300, true}}},
+		{provider: 100 * time.Millisecond},
+	})
+	tm := ttTimings(t, rec.events)
+	if len(tm) != 3 {
+		t.Fatalf("%d turn.timing events, want 3", len(tm))
+	}
+	for i, f := range tm {
+		if ttInt(t, f, "n") != int64(i+1) {
+			t.Errorf("turn %d n %v", i+1, f["n"])
+		}
+		w := ttInt(t, f, "wall_ms")
+		oh := ttInt(t, f, "overhead_ms")
+		sum := ttInt(t, f, "provider_wait_ms") + ttInt(t, f, "backoff_ms") + ttInt(t, f, "tool_wall_ms") + oh
+		if sum != w || oh < 0 || oh*20 > w {
+			t.Errorf("turn %d identity or 5 percent bound: %v", i+1, f)
+		}
+	}
+	if ttInt(t, tm[0], "provider_wait_ms") != 300 || ttInt(t, tm[0], "tool_wall_ms") != 200 || ttInt(t, tm[0], "wall_ms") != 500 || ttInt(t, tm[0], "overhead_ms") != 0 {
+		t.Errorf("turn 1: %v", tm[0])
+	}
+	ttShellMS(t, tm[0], 200)
+	ttShellMS(t, tm[1], 600)
+	if ttInt(t, tm[1], "tool_wall_ms") != 300 || ttInt(t, tm[1], "overhead_ms") < 0 {
+		t.Errorf("turn 2: %v", tm[1])
+	}
+	if ttInt(t, tm[2], "provider_wait_ms") != 100 {
+		t.Errorf("turn 3: %v", tm[2])
+	}
+	if m, ok := tm[2]["tool_ms"].(map[string]int64); !ok || len(m) != 0 {
+		t.Errorf("turn 3 tool_ms %#v", tm[2]["tool_ms"])
+	}
+}
+
+func TestTurnTimingBackoffAcceptance(t *testing.T) {
+	tm := ttTimings(t, ttRun(t, []ttTurn{{failAfter: 50 * time.Millisecond, provider: 300 * time.Millisecond}}).events)
+	if len(tm) != 1 || ttInt(t, tm[0], "backoff_ms") != 2000 || ttInt(t, tm[0], "provider_wait_ms") != 350 {
+		t.Errorf("backoff case: %v", tm)
+	}
+	tm = ttTimings(t, ttRun(t, []ttTurn{{failAfter: 50 * time.Millisecond, retryAfter: "3", provider: 300 * time.Millisecond}}).events)
+	if len(tm) != 1 || ttInt(t, tm[0], "backoff_ms") != 3000 {
+		t.Errorf("retry-after case: %v", tm)
+	}
+}
+
+// The reads per turn of this same 30-turn session on the tree before the change, measured by
+// running it there: Client.Now 11 for every turn, Tools.Now 6 for turns 1 to 29 and 2 for turn 30.
+func ttBaseline(turn int) (client, tools int) {
+	if turn == 30 {
+		return 11, 2
+	}
+	return 11, 6
+}
+
+func TestTurnTimingPlacementAcceptance(t *testing.T) {
+	turns := make([]ttTurn, 30)
+	for i := range turns {
+		turns[i] = ttTurn{provider: 20 * time.Millisecond, shells: []ttShell{{10, false}}}
+	}
+	turns[29].shells = nil
+	rec := ttRun(t, turns)
+	if tm := ttTimings(t, rec.events); len(tm) != 30 {
+		t.Fatalf("%d turn.timing events, want exactly 30", len(tm))
+	}
+	if len(rec.clientReads) != 31 {
+		t.Fatalf("%d clock snapshots, want 31", len(rec.clientReads))
+	}
+	for i := 0; i < 30; i++ {
+		c := rec.clientReads[i+1] - rec.clientReads[i]
+		k := rec.toolsReads[i+1] - rec.toolsReads[i]
+		bc, bk := ttBaseline(i + 1)
+		if c+k > bc+bk+8 {
+			t.Errorf("turn %d reads client %d tools %d, baseline %d and %d plus eight in total", i+1, c, k, bc, bk)
+		}
+	}
+}

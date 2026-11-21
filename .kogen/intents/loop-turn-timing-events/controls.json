@@ -1,0 +1,1 @@
+{"deferred":"The correct implementation spans loop/session.go, api/api.go, cmd/kogen-loop/main.go, the contract note and conformance fixtures; the Build writes it."}

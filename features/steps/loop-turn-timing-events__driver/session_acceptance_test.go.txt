@@ -1,0 +1,99 @@
+package conformance
+
+import (
+	"math"
+	"path/filepath"
+	"testing"
+)
+
+// ttSums are the timing fields summed over the turn.timing events of one run.
+func ttSums(t *testing.T, r result) map[string]float64 {
+	t.Helper()
+	sums := map[string]float64{}
+	tools := map[string]float64{}
+	for _, ev := range r.all("turn.timing") {
+		for _, k := range []string{"provider_wait_ms", "backoff_ms", "tool_wall_ms", "overhead_ms", "wall_ms"} {
+			v, ok := ev[k].(float64)
+			if !ok {
+				t.Fatalf("turn.timing %s is %T in %v", k, ev[k], ev)
+			}
+			sums[k] += v
+		}
+		m, ok := ev["tool_ms"].(map[string]any)
+		if !ok {
+			t.Fatalf("turn.timing tool_ms is %T in %v", ev["tool_ms"], ev)
+		}
+		for name, v := range m {
+			tools[name] += v.(float64)
+		}
+	}
+	for name, v := range tools {
+		sums["tool_ms."+name] = v
+	}
+	return sums
+}
+
+// ttCheckSummary compares the session.ended timing field with the sum of the run's own
+// turn.timing events.
+func ttCheckSummary(t *testing.T, label string, r result, turns int) map[string]float64 {
+	t.Helper()
+	if got := len(r.all("turn.timing")); got != turns {
+		t.Fatalf("%s: %d turn.timing events, want %d: %v", label, got, turns, r.types())
+	}
+	timing, ok := r.first("session.ended")["timing"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s: session.ended has no timing object: %v", label, r.first("session.ended"))
+	}
+	sums := ttSums(t, r)
+	for _, k := range []string{"provider_wait_ms", "backoff_ms", "tool_wall_ms", "overhead_ms"} {
+		if v, ok := timing[k].(float64); !ok || v != sums[k] {
+			t.Errorf("%s: timing.%s = %v, want the sum %v of the turn.timing events", label, k, timing[k], sums[k])
+		}
+	}
+	tm, ok := timing["tool_ms"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s: timing.tool_ms is %T", label, timing["tool_ms"])
+	}
+	for name, v := range tm {
+		if v.(float64) != sums["tool_ms."+name] {
+			t.Errorf("%s: timing.tool_ms.%s = %v, want %v", label, name, v, sums["tool_ms."+name])
+		}
+	}
+	for k := range sums {
+		if len(k) > 8 && k[:8] == "tool_ms." {
+			if _, ok := tm[k[8:]]; !ok {
+				t.Errorf("%s: timing.tool_ms lacks %s", label, k[8:])
+			}
+		}
+	}
+	sw, ok := timing["session_wall_ms"].(float64)
+	parts := sums["provider_wait_ms"] + sums["backoff_ms"] + sums["tool_wall_ms"] + sums["overhead_ms"]
+	if !ok || math.Abs(sw-parts) > parts*0.05 {
+		t.Errorf("%s: session_wall_ms %v is not within 5 percent of %v", label, timing["session_wall_ms"], parts)
+	}
+	return sums
+}
+
+func TestTurnTimingSessionAcceptance(t *testing.T) {
+	w := newWorld(t).signIn()
+	dir := filepath.Join(t.TempDir(), "transcript")
+	f := newFakeProvider(t, []exchange{
+		{DelayMS: 300, Items: []map[string]any{call("c1", "shell", map[string]any{"command": "true"})}},
+		{DelayMS: 300, Items: []map[string]any{call("c2", "finish", map[string]any{"summary": "first"})}},
+		{DelayMS: 300, Items: []map[string]any{message("second answer")}},
+	})
+	first := runCLI(t, w, f, sessionTask(w, dir, false, map[string]any{"prompt": "start"}))
+	if first.exit != 0 {
+		t.Fatal(first.stderr)
+	}
+	sums := ttCheckSummary(t, "first session", first, 2)
+	if sums["provider_wait_ms"] < 500 {
+		t.Errorf("first session provider_wait_ms %v, want at least 500 for two 300 ms answers", sums["provider_wait_ms"])
+	}
+	second := runCLI(t, w, f, sessionTask(w, dir, true, map[string]any{"prompt": "feedback: check again"}))
+	if second.exit != 0 {
+		t.Fatalf("%v %s", second.events, second.stderr)
+	}
+	// The resumed session counts only the turn it ran itself.
+	ttCheckSummary(t, "resumed session", second, 1)
+}

@@ -352,13 +352,25 @@ Every line has `protocol`, `seq` (1-based, gapless), `time` (RFC 3339 UTC) and `
 | `context.condensed` | `n` (the request it precedes), `requests` (summarization requests), `condensed_exchanges`, `kept_exchanges`, `bytes_before`, `bytes_after`, `limit`, `summary_bytes`, `usage` (`api.Usage` of the summarization requests; unknown stays null); `failed` (`true`) only on a condensation that failed after sending a summarization request, with `condensed_exchanges`, `kept_exchanges`, `bytes_after` and `summary_bytes` 0, emitted before the round's `error` |
 | `tool.call` | `call_id`, `name`, `arguments_sha256` |
 | `tool.result` | `call_id`, `name`, `result_sha256`, `bytes`, `cut` (bool), `elapsed_ms` (integer, every result), `rule` only for a refused shell call, `shell_wait` only for a shell call that reached its bounded wait (see [Shell time limit](#shell-time-limit)), `exit_status` (integer) only for a shell call that returns a completed command's result (see [Shell time limit](#shell-time-limit)), `error_kind` only for a tool error and `malformed_class` only for a malformed call (see [Tool error kinds and malformed call classes](#tool-error-kinds-and-malformed-call-classes)), `omitted_lines` only for a cut numbered `read_file` result and `recovers` only for a numbered `read_file` result that delivers lines an earlier cut read of the same file omitted (see [Tool result cut](#tool-result-cut-fixed)). `bytes` and `result_sha256` describe what the model received, after the cut. |
+| `turn.timing` | `n` (the request number of the turn's `request.started`), `wall_ms`, `provider_wait_ms`, `backoff_ms`, `tool_ms` (object: tool name to the sum of the `elapsed_ms` of its results in the turn; `{}` when no tool ran), `tool_wall_ms`, `overhead_ms` (all integer milliseconds) |
 | `round.ended` | `ending` (`terminal`/`no_call`), `terminal_tool`, `claim` (terminal arguments or final text — `output_text` and `refusal` parts in content order, newline-joined — bounded 16384 bytes; **a claim, not proof**), `requests`, `usage` (round total) |
 | `error` | `class`, `reason`, `detail` (same shape as `sys.Error`) |
-| `session.ended` | `status` (`ended`/`failed`/`interrupted`), `exit` |
+| `session.ended` | `status` (`ended`/`failed`/`interrupted`), `exit`, `timing` (the `turn.timing` keys except `n`, summed over the turns this process ran itself, plus `session_wall_ms`) |
 
 `elapsed_ms` is the wall time in whole milliseconds from the moment the session starts running the call to the moment its output is complete (before the cut); it is measured with `Tools.Now`, a test seam that production leaves nil (`time.Now`) and that the `shell_wait` wait instants also read; it holds a number only.
 
 `model_ms` is the wall time in whole milliseconds of that model turn, from the moment the session emits the turn's `request.started` to the moment it emits the turn's `response` event; `model_ms` and `elapsed_ms` use the same clock (`Tools.Now`, `time.Now` when nil).
+
+`turn.timing` is the last event of every turn: the session emits it after the last event it emits for the turn (after the transcript is written, when the turn ends the round) and before the next turn's `request.started` or, after the last turn, before `round.ended`. A turn that fails after its `request.started` emits one too, before the `error` event. Each turn emits exactly one. The events only observe: without `turn.timing` and the `timing` field the stream is the stream of the earlier build apart from `seq` and `time`. Durations are whole milliseconds read from the clocks the engine already uses (`Client.Now` for the provider, `Tools.Now` for tools and the turn's wall time; `time.Now` when nil):
+
+- `wall_ms` is the time from the turn's `request.started` to its `turn.timing`.
+- `provider_wait_ms` is the sum of the `wall_ms` of the turn's `request.attempt` records, retries and condensation summarization attempts included.
+- `backoff_ms` is the time between the attempts of one request: for consecutive attempts of the same `operation_id`, the difference of their `request_offset_ms` minus the earlier attempt's `wall_ms` (a `Retry-After` wait counts as advertised).
+- `tool_ms` sums the `elapsed_ms` of the turn's `tool.result` events by tool name; a terminal call such as `finish` counts only when it produces a `tool.result` with an `elapsed_ms`.
+- `tool_wall_ms` is the length of the union of the turn's tool call intervals (overlapping calls count once).
+- `overhead_ms` is `wall_ms` minus `provider_wait_ms`, `backoff_ms` and `tool_wall_ms`, never negative.
+
+`session.ended` `timing` sums those keys over the turns of the session the process ran (a resumed session counts only its own turns; a task refused before the session started has zeros) and adds `session_wall_ms`, the time from `session.started` to `session.ended` (0 when `session.started` was not emitted).
 
 `session.ended` is always the last line. Callers must ignore unknown fields and unknown event types inside the same major version.
 
