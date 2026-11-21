@@ -90,25 +90,25 @@ func TestStreamIdleFirstByte(t *testing.T) {
 		first := w.first
 		head, tail := idleAnswer(w.name)
 		full := head + tail
-		want := "no first byte within " + idleSecs(first)
-		if w.name == "opencode-go" {
-			want = "no response headers within " + idleSecs(first)
-		}
+		wantHeaders := "no response headers within " + idleSecs(DefaultHeaderTimeout)
+		wantFirst := "no first byte within " + idleSecs(first)
 
 		// stalls is every way the first byte can be late, as attempt scripts of a late and an in-time try
 		type stall struct {
 			name         string
 			late, onTime obsAttempt
 			streamOnly   bool
+			want         string
 		}
 		stalls := []stall{
-			{name: "headers late", late: obsAttempt{headersAdvance: first, steps: []obsStep{{advance: ms1, data: full}}},
-				onTime: obsAttempt{headersAdvance: first - ms1, steps: []obsStep{{data: full}}}},
-			{name: "body late", streamOnly: true, late: obsAttempt{headersAdvance: 10 * ms1, steps: []obsStep{{advance: first - 10*ms1, data: full}}},
-				onTime: obsAttempt{headersAdvance: 10 * ms1, steps: []obsStep{{advance: first - 11*ms1, data: full}}}},
-			// the headers are not the first stream byte: silence after them still expires at the limit
-			{name: "headers then silence", streamOnly: true, late: obsAttempt{headersAdvance: first - ms1, steps: []obsStep{{advance: ms1}, {data: full}}},
-				onTime: obsAttempt{headersAdvance: first - ms1, steps: []obsStep{{data: full}}}},
+			// the header wait of every route is the header timeout
+			{name: "headers late", want: wantHeaders, late: obsAttempt{headersAdvance: DefaultHeaderTimeout, steps: []obsStep{{advance: ms1, data: full}}},
+				onTime: obsAttempt{headersAdvance: DefaultHeaderTimeout - ms1, steps: []obsStep{{data: full}}}},
+			{name: "body late", streamOnly: true, want: wantFirst, late: obsAttempt{headersAdvance: 10 * ms1, steps: []obsStep{{advance: first, data: full}}},
+				onTime: obsAttempt{headersAdvance: 10 * ms1, steps: []obsStep{{advance: first - ms1, data: full}}}},
+			// the first-progress clock starts at the headers, however late they came
+			{name: "headers then silence", streamOnly: true, want: wantFirst, late: obsAttempt{headersAdvance: 100 * time.Second, steps: []obsStep{{advance: first - ms1}, {advance: ms1}, {data: full}}},
+				onTime: obsAttempt{headersAdvance: 100 * time.Second, steps: []obsStep{{advance: first - ms1, data: full}}}},
 		}
 		for _, st := range stalls {
 			if st.streamOnly && !w.stream {
@@ -144,8 +144,8 @@ func TestStreamIdleFirstByte(t *testing.T) {
 				// silence on every attempt: the usual three attempts, with the timeout in the detail
 				e, tr, req = idleEnv(t, w.name, st.late, st.late, st.late, st.late)
 				_, err := respondIdle(t, e, req, nil)
-				if err == nil || !strings.Contains(idleText(err), "did not answer after 3 attempts") || !strings.Contains(idleText(err), want) {
-					t.Fatalf("error %v, want the detail %q", err, want)
+				if err == nil || !strings.Contains(idleText(err), "did not answer after 3 attempts") || !strings.Contains(idleText(err), st.want) {
+					t.Fatalf("error %v, want the detail %q", err, st.want)
 				}
 				if tr.next != 3 || !reflect.DeepEqual(e.clk.slept(), []time.Duration{2 * time.Second, 8 * time.Second}) {
 					t.Fatalf("%d requests, slept %v", tr.next, e.clk.slept())
@@ -157,7 +157,7 @@ func TestStreamIdleFirstByte(t *testing.T) {
 	t.Run("single", func(t *testing.T) {
 		t.Parallel()
 		head, tail := idleAnswer("chatgpt")
-		late := obsAttempt{headersAdvance: 90 * time.Second, steps: []obsStep{{data: head + tail}}}
+		late := obsAttempt{steps: []obsStep{{advance: 90 * time.Second, data: head + tail}}}
 		e, tr, req := idleEnv(t, "chatgpt", late, obsAttempt{steps: []obsStep{{data: head + tail}}})
 		req.Single = true
 		obs := &observer{}
@@ -369,6 +369,9 @@ func TestStreamIdleCompatibility(t *testing.T) {
 			t.Parallel()
 			head, tail := idleAnswer(w.name)
 			late := obsAttempt{headersAdvance: w.first, steps: []obsStep{{data: head + tail}}}
+			if w.stream {
+				late = obsAttempt{steps: []obsStep{{advance: w.first, data: head + tail}}}
+			}
 			ok := obsAttempt{steps: []obsStep{{advance: ms1, data: head + tail}}}
 			e, tr, req := idleEnv(t, w.name, late, ok)
 			if _, err := respondIdle(t, e, req, nil); err != nil { // no observer
@@ -543,7 +546,7 @@ func TestStreamIdleBlocked(t *testing.T) {
 	var blocks []block
 	for _, w := range idleWires {
 		head, _ := idleAnswer(w.name)
-		blocks = append(blocks, block{w.name + "/before headers", w.name, blockAttempt{headers: true}, w.first})
+		blocks = append(blocks, block{w.name + "/before headers", w.name, blockAttempt{headers: true}, DefaultHeaderTimeout})
 		if w.stream {
 			blocks = append(blocks, block{w.name + "/headers then silence", w.name, blockAttempt{hold: true}, w.first})
 			blocks = append(blocks, block{w.name + "/after a byte", w.name, blockAttempt{chunks: []string{head}, hold: true}, idleLimit})

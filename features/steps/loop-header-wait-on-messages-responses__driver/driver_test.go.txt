@@ -1,0 +1,192 @@
+package provider
+
+import (
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+// Driver tests of the response-header wait on the Responses and Messages routes. They reuse the
+// fixture server and read signals of header_timeout_test.go and idle_stream_test.go and run on the
+// package's simulated Client.Now: the clock moves only while the client is blocked on the server.
+
+const hwaGuard = 3 * time.Second
+
+func hwaStart(t *testing.T, srv *hdtServer, wire string, headerTimeout time.Duration) *hdtCall {
+	t.Helper()
+	old := idlePoll
+	idlePoll = 5 * time.Millisecond
+	t.Cleanup(func() { idlePoll = old })
+	e, _, req := obsEnv(t, wire)
+	e.c.HeaderTimeout = headerTimeout
+	st := &signalTransport{rt: &http.Transport{}, reads: make(chan readSignal, 1024)}
+	t.Cleanup(func() { st.rt.(*http.Transport).CloseIdleConnections() })
+	e.c.HTTP = &http.Client{Transport: st}
+	e.s = sys.NewWith([]string{"HOME=" + e.home, "PATH=" + os.Getenv("PATH"), "KOGEN_PROVIDER_URL=" + srv.srv.URL}, e.home)
+	c := &hdtCall{t: t, e: e, reads: st.reads, guard: time.After(hwaGuard)}
+	// Release every held handler so the server closes at once when a test fails.
+	t.Cleanup(func() {
+		for _, p := range srv.plans {
+			if p.hold != nil {
+				select {
+				case <-p.hold:
+				default:
+					close(p.hold)
+				}
+			}
+		}
+	})
+	c.run(req)
+	return c
+}
+
+// hwaStillWaiting fails when the client already left request i: the handler returned.
+func hwaStillWaiting(t *testing.T, srv *hdtServer, i int, why string) {
+	t.Helper()
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-srv.gone[i]:
+		t.Fatalf("request %d: the client gave up too early: %s", i+1, why)
+	default:
+	}
+}
+
+func hwaWantSuccess(t *testing.T, c *hdtCall, srv *hdtServer) {
+	t.Helper()
+	if c.err != nil || c.resp == nil {
+		t.Fatalf("the call failed: %v", idleText(c.err))
+	}
+	if n := srv.count(); n != 1 {
+		t.Fatalf("%d requests reached the server, want 1 (an attempt was cut and retried)", n)
+	}
+	if len(c.e.clk.slept()) != 0 {
+		t.Fatalf("slept %v: an attempt was retried", c.e.clk.slept())
+	}
+}
+
+func hwaDelayedHeaders(t *testing.T, wire string, delay time.Duration) {
+	head, tail := wireStream(wire)
+	p := &hdtPlan{ctype: "text/event-stream", hold: make(chan struct{}), body: make(chan string, 4)}
+	srv := newHdtServer(t, p)
+	c := hwaStart(t, srv, wire, 0)
+	c.waitOpen(srv, 0)
+	c.e.clk.advance(delay)
+	close(p.hold)
+	c.waitRead(1, 0)
+	p.body <- head
+	p.body <- tail
+	close(p.body)
+	c.wait()
+	hwaWantSuccess(t, c, srv)
+}
+
+func TestHeaderWaitDriverMessages60s(t *testing.T) {
+	hwaDelayedHeaders(t, "anthropic", 60*time.Second)
+}
+
+func TestHeaderWaitDriverResponses100s(t *testing.T) {
+	hwaDelayedHeaders(t, "chatgpt", 100*time.Second)
+}
+
+func hwaNeverHeaders(t *testing.T, timeout time.Duration, want string) {
+	srv := newHdtServer(t,
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{})},
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{})},
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{})})
+	c := hwaStart(t, srv, "anthropic", timeout)
+	limit := timeout
+	if limit <= 0 {
+		limit = DefaultHeaderTimeout
+	}
+	for i := range srv.plans {
+		c.waitOpen(srv, i)
+		c.e.clk.advance(limit - time.Second)
+		hwaStillWaiting(t, srv, i, "the header wait is bounded by "+want+", not less")
+		c.e.clk.advance(time.Second)
+		select {
+		case <-srv.gone[i]:
+		case <-c.guard:
+			t.Fatalf("request %d: %v without headers and the client still waited", i+1, limit)
+		}
+	}
+	c.wait()
+	if c.err == nil {
+		t.Fatal("the call succeeded although the server never sent headers")
+	}
+	text := idleText(c.err)
+	if !strings.Contains(text, want) || !strings.Contains(text, "did not answer after 3 attempts") {
+		t.Errorf("error %q does not say three attempts ended with %q", text, want)
+	}
+	low := strings.ToLower(text)
+	if strings.Contains(low, "first byte") || strings.Contains(low, "idle") {
+		t.Errorf("error %q uses the first-byte or idle wording", text)
+	}
+	if srv.count() != 3 {
+		t.Errorf("%d requests, want 3", srv.count())
+	}
+}
+
+func TestHeaderWaitDriverMessagesNeverHeaders(t *testing.T) {
+	hwaNeverHeaders(t, 0, "no response headers within 120 s")
+}
+
+func TestHeaderWaitDriverMessagesConfiguredTimeout(t *testing.T) {
+	hwaNeverHeaders(t, 30*time.Second, "no response headers within 30 s")
+}
+
+// Headers at 100 s and the first event 40 s later: the first-progress clock starts at the headers.
+func TestHeaderWaitDriverMessagesFirstEventAfterHeaders(t *testing.T) {
+	head, tail := wireStream("anthropic")
+	p := &hdtPlan{ctype: "text/event-stream", hold: make(chan struct{}), body: make(chan string, 4)}
+	srv := newHdtServer(t, p)
+	c := hwaStart(t, srv, "anthropic", 0)
+	c.waitOpen(srv, 0)
+	c.e.clk.advance(100 * time.Second)
+	close(p.hold)
+	c.waitRead(1, 0)
+	c.e.clk.advance(40 * time.Second)
+	p.body <- head
+	c.waitRead(1, len(head))
+	p.body <- tail
+	close(p.body)
+	c.wait()
+	hwaWantSuccess(t, c, srv)
+}
+
+// The same headers and then silence: the attempt ends 45 s after the headers, naming the first byte.
+func TestHeaderWaitDriverMessagesSilenceAfterHeaders(t *testing.T) {
+	srv := newHdtServer(t,
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{}), body: make(chan string)},
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{}), body: make(chan string)},
+		&hdtPlan{ctype: "text/event-stream", hold: make(chan struct{}), body: make(chan string)})
+	c := hwaStart(t, srv, "anthropic", 0)
+	for i, p := range srv.plans {
+		c.waitOpen(srv, i)
+		c.e.clk.advance(100 * time.Second)
+		close(p.hold)
+		c.waitRead(i+1, 0)
+		c.e.clk.advance(44 * time.Second)
+		hwaStillWaiting(t, srv, i, "the first-progress limit counts from the headers: 44 s is within 45 s")
+		c.e.clk.advance(time.Second)
+		select {
+		case <-srv.gone[i]:
+		case <-c.guard:
+			t.Fatalf("request %d: 45 s of silence after the headers and the client still waited", i+1)
+		}
+	}
+	c.wait()
+	if c.err == nil {
+		t.Fatal("the call succeeded although the server stayed silent after the headers")
+	}
+	text := idleText(c.err)
+	if !strings.Contains(text, "no first byte within 45 s") {
+		t.Errorf("error %q does not name the 45 s first-byte limit", text)
+	}
+	if srv.count() != 3 {
+		t.Errorf("%d requests, want 3", srv.count())
+	}
+}

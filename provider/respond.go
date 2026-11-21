@@ -640,7 +640,7 @@ func (r *run) exchangeResponses(token string) (result, error) {
 	hat := k.c.now()
 	r.so.gotHeaders(hat)
 	r.requestID = identifier(resp.Header.Get("X-Request-Id"))
-	if w.expired() {
+	if w.gotHeaders(hat) {
 		return r.idleStop(ctx, w)
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
@@ -880,7 +880,7 @@ func (r *run) exchangeMessages(key string) (result, error) {
 			break
 		}
 	}
-	if w.expired() {
+	if w.gotHeaders(hat) {
 		return r.idleStop(ctx, w)
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {

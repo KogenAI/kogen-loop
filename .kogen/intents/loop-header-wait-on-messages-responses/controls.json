@@ -1,0 +1,1 @@
+{"deferred":"The acceptance runs real Go driver tests of the provider package against local httptest servers on the simulated clock, and the correct change touches the watch in provider/idle.go and both stream exchanges in provider/respond.go plus the existing idle tests whose old dispatch-clock expectations must be updated; the Build writes and verifies that implementation."}
