@@ -1,0 +1,312 @@
+package provider
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+// Driver tests of the Chat Completions streaming route. They use the package's existing local
+// fixture server, simulated clock and attempt observer; nothing here is production code.
+
+const csSSE = "text/event-stream"
+
+func csChunk(delta map[string]any, finish any, extra map[string]any) string {
+	choice := map[string]any{"index": int64(0), "delta": delta}
+	if finish != nil {
+		choice["finish_reason"] = finish
+	}
+	ch := map[string]any{"id": "chatcmpl-stream", "object": "chat.completion.chunk", "model": "kimi-k3", "choices": []any{choice}}
+	for k, v := range extra {
+		ch[k] = v
+	}
+	return "data: " + string(mustEncode(ch)) + "\n\n"
+}
+
+func csCall(fn map[string]any, withID bool) map[string]any {
+	c := map[string]any{"index": int64(0), "function": fn}
+	if withID {
+		c["id"], c["type"] = "call_1", "function"
+	}
+	return c
+}
+
+func csUsage() map[string]any {
+	return map[string]any{"usage": map[string]any{"prompt_tokens": int64(100), "completion_tokens": int64(20),
+		"prompt_tokens_details": map[string]any{"cached_tokens": int64(60)}}}
+}
+
+const csDone = "data: [DONE]\n\n"
+
+type csCapture struct {
+	rt     http.RoundTripper
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (c *csCapture) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.GetBody != nil {
+		if rc, err := req.GetBody(); err == nil {
+			b, _ := io.ReadAll(rc)
+			c.mu.Lock()
+			c.bodies = append(c.bodies, string(b))
+			c.mu.Unlock()
+		}
+	}
+	return c.rt.RoundTrip(req)
+}
+
+type csRun struct {
+	e      *env
+	obs    *observer
+	resp   *Response
+	err    error
+	bodies []string
+}
+
+// driveChat runs one Respond on the opencode-go Chat route. The first `stalls` attempts get
+// the same steps and then endAfter more simulated time, at which the client must have given up
+// (stalls > 0) or finished; later attempts, and every attempt when stalls is 0, get answer at once.
+func driveChat(t *testing.T, ctype string, stalls int, answer string, steps []idleStep, endAfter time.Duration) csRun {
+	t.Helper()
+	old := idlePoll
+	idlePoll = 5 * time.Millisecond
+	defer func() { idlePoll = old }()
+	srv := newIdleServer(t, "chatgpt", stalls)
+	srv.ctype = ctype
+	if answer != "" {
+		srv.answer = answer
+	}
+	e, _, req := obsEnv(t, "opencode-go")
+	st := &signalTransport{rt: &http.Transport{}, reads: make(chan readSignal, 1024)}
+	t.Cleanup(func() { st.rt.(*http.Transport).CloseIdleConnections() })
+	cap := &csCapture{rt: st}
+	e.c.HTTP = &http.Client{Transport: cap}
+	e.s = sys.NewWith([]string{"HOME=" + e.home, "PATH=" + os.Getenv("PATH"), "KOGEN_PROVIDER_URL=" + srv.srv.URL}, e.home)
+
+	run := csRun{e: e, obs: &observer{}}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		run.resp, run.err = e.c.Respond(context.Background(), e.s, req, run.obs)
+	}()
+	guard := time.After(idleGuard)
+	waitRead := func(attempt, bytes int) {
+		t.Helper()
+		for {
+			select {
+			case sig := <-st.reads:
+				if sig.attempt == attempt && sig.bytes >= bytes {
+					return
+				}
+			case <-guard:
+				t.Fatalf("attempt %d: the client never read %d bytes", attempt, bytes)
+			}
+		}
+	}
+	for i, stall := range srv.stalls {
+		select {
+		case <-stall.open:
+		case <-guard:
+			t.Fatalf("attempt %d never reached the server", i+1)
+		}
+		waitRead(i+1, 0)
+		sent := 0
+		for _, s := range steps {
+			e.clk.advance(s.advance)
+			if s.send != "" {
+				stall.cmds <- s.send
+				sent += len(s.send)
+				waitRead(i+1, sent)
+			}
+		}
+		e.clk.advance(endAfter)
+		select {
+		case <-stall.gone:
+		case <-guard:
+			t.Fatalf("attempt %d: the stream ended or the limit passed but the connection stayed open", i+1)
+		}
+	}
+	select {
+	case <-finished:
+	case <-guard:
+		t.Fatal("Respond did not return")
+	}
+	cap.mu.Lock()
+	run.bodies = append(run.bodies, cap.bodies...)
+	cap.mu.Unlock()
+	return run
+}
+
+func csText(t *testing.T, it map[string]any) string {
+	t.Helper()
+	list, _ := asList(it["content"])
+	if len(list) != 1 {
+		t.Fatalf("message content = %v", it["content"])
+	}
+	b, _ := asMap(list[0])
+	s, _ := b["text"].(string)
+	return s
+}
+
+func csWantOneCall(t *testing.T, r csRun, args string) {
+	t.Helper()
+	if r.err != nil || r.resp == nil {
+		t.Fatalf("the call failed: %v", r.err)
+	}
+	items := r.resp.Items
+	if len(items) != 2 || items[0]["type"] != "message" || items[1]["type"] != "function_call" {
+		t.Fatalf("items = %s, want one message then exactly one function_call", jsonOf(t, items))
+	}
+	if items[1]["call_id"] != "call_1" || items[1]["name"] != "read_file" || items[1]["arguments"] != args {
+		t.Fatalf("call = %s, want call_1 read_file %s", jsonOf(t, items[1]), args)
+	}
+	raw, _ := asMap(items[0]["opencode_go_message"])
+	calls, _ := asList(raw["tool_calls"])
+	if raw["role"] != "assistant" || len(calls) != 1 {
+		t.Fatalf("kept message = %s, want an assistant message with exactly one tool call", jsonOf(t, raw))
+	}
+	c, _ := asMap(calls[0])
+	fn, _ := asMap(c["function"])
+	if c["id"] != "call_1" || c["type"] != "function" || fn["name"] != "read_file" || fn["arguments"] != args {
+		t.Fatalf("kept call = %s", jsonOf(t, c))
+	}
+}
+
+// Serial: idlePoll and liveWatches are package globals.
+// The server accepts the request and sends no byte for 60 seconds of simulated time, then three
+// data chunks and the done marker.
+func TestChatStreamSlowFirstChunkSucceeds(t *testing.T) {
+	if firstByteDefault != 45*time.Second || streamIdle != 180*time.Second {
+		t.Fatalf("watchdog limits changed: first byte %v, idle %v", firstByteDefault, streamIdle)
+	}
+	a := csChunk(map[string]any{"role": "assistant", "content": "Hello"}, nil, nil)
+	b := csChunk(map[string]any{"tool_calls": []any{csCall(map[string]any{"name": "read_file", "arguments": `{"path":"a.go"}`}, true)}}, nil, nil)
+	c := csChunk(map[string]any{}, "tool_calls", csUsage())
+	r := driveChat(t, csSSE, 1, "", []idleStep{{60 * time.Second, a}, {0, b}, {0, c + csDone}}, 0)
+	csWantOneCall(t, r, `{"path":"a.go"}`)
+	if got := csText(t, r.resp.Items[0]); got != "Hello" {
+		t.Fatalf("text = %q, want Hello", got)
+	}
+	if r.resp.Usage != (Usage{Input: 100, Cached: 60, Output: 20}) {
+		t.Fatalf("usage = %+v, want input 100 cached 60 output 20", r.resp.Usage)
+	}
+	wantFields(t, "only attempt", attemptRecords(t, r.obs, 1)[0], map[string]any{"outcome": "completed", "error": nil})
+	if len(r.e.clk.slept()) != 0 {
+		t.Fatalf("slept %v: an attempt was retried after an idle timeout", r.e.clk.slept())
+	}
+	if n := liveWatches.Load(); n != 0 {
+		t.Fatalf("%d attempt timers still running", n)
+	}
+}
+
+// Serial: idlePoll and liveWatches are package globals.
+// Keep-alive comments arrive until 60 seconds, then nothing: they never renew the idle clock, so
+// the attempt ends at 180 seconds from the headers (190 seconds in all), not 180 seconds after the
+// last comment.
+func TestChatStreamKeepAlivesAreNotProgress(t *testing.T) {
+	beat := ": keep-alive\n\n"
+	r := driveChat(t, csSSE, 3, "", []idleStep{{20 * time.Second, beat}, {20 * time.Second, beat}, {20 * time.Second, beat}}, 130*time.Second)
+	text := idleText(r.err)
+	if r.err == nil || !strings.Contains(text, "did not answer after 3 attempts") || !strings.Contains(text, "stream idle for 180 s") {
+		t.Fatalf("error %q, want stream idle for 180 s after 3 attempts", text)
+	}
+	for i, rec := range attemptRecords(t, r.obs, 3) {
+		wantFields(t, "attempt "+string(rune('1'+i)), rec, map[string]any{"outcome": "failed", "end_reason": "idle"})
+	}
+}
+
+// Serial: idlePoll and liveWatches are package globals.
+func TestChatStreamSilenceAfterFirstChunkIsIdle(t *testing.T) {
+	a := csChunk(map[string]any{"role": "assistant", "content": "Hel"}, nil, nil)
+	r := driveChat(t, csSSE, 3, "", []idleStep{{40 * time.Second, a}}, 200*time.Second)
+	text := idleText(r.err)
+	if r.err == nil || !strings.Contains(text, "did not answer after 3 attempts") || !strings.Contains(text, "stream idle for 180 s") {
+		t.Fatalf("error %q, want stream idle for 180 s after 3 attempts", text)
+	}
+	for i, rec := range attemptRecords(t, r.obs, 3) {
+		wantFields(t, "attempt "+string(rune('1'+i)), rec, map[string]any{"outcome": "failed", "end_reason": "idle"})
+	}
+}
+
+func TestChatStreamPlainJSONBodyIsStillAccepted(t *testing.T) {
+	raw := map[string]any{"role": "assistant", "content": "hello"}
+	body := string(mustEncode(goAnswer(raw, "stop", "usage", map[string]any{"prompt_tokens": int64(100), "completion_tokens": int64(20),
+		"prompt_tokens_details": map[string]any{"cached_tokens": int64(60)}})))
+	r := driveChat(t, "application/json", 0, body, nil, 0)
+	if r.err != nil || r.resp == nil {
+		t.Fatalf("the call failed: %v", r.err)
+	}
+	if len(r.bodies) != 1 || !strings.Contains(r.bodies[0], `"stream":true`) {
+		t.Fatalf("request bodies = %q, want one body asking for a stream", r.bodies)
+	}
+	items := r.resp.Items
+	if len(items) != 1 || items[0]["type"] != "message" || csText(t, items[0]) != "hello" {
+		t.Fatalf("items = %s, want one assistant message hello", jsonOf(t, items))
+	}
+	kept, _ := asMap(items[0]["opencode_go_message"])
+	if kept["role"] != "assistant" || kept["content"] != "hello" {
+		t.Fatalf("kept message = %s", jsonOf(t, kept))
+	}
+	if r.resp.Usage != (Usage{Input: 100, Cached: 60, Output: 20}) || r.resp.ID != "chatcmpl-fixture" || r.resp.Model != "kimi-k3" {
+		t.Fatalf("response = %+v", r.resp)
+	}
+}
+
+func TestChatStreamAssemblesFragmentedArguments(t *testing.T) {
+	frag := func(s string, first bool) string {
+		fn := map[string]any{"arguments": s}
+		if first {
+			fn["name"] = "read_file"
+		}
+		return csChunk(map[string]any{"tool_calls": []any{csCall(fn, first)}}, nil, nil)
+	}
+	answer := frag(`{"path"`, true) + frag(`:"a.go"`, false) + frag(`,"n":`, false) + frag(`1}`, false) +
+		csChunk(map[string]any{}, "tool_calls", csUsage()) + csDone
+	r := driveChat(t, csSSE, 0, answer, nil, 0)
+	csWantOneCall(t, r, `{"path":"a.go","n":1}`)
+}
+
+func TestChatStreamRequestBody(t *testing.T) {
+	answer := csChunk(map[string]any{"role": "assistant", "content": "ok"}, "stop", csUsage()) + csDone
+	r := driveChat(t, csSSE, 0, answer, nil, 0)
+	if r.err != nil || len(r.bodies) != 1 {
+		t.Fatalf("err %v, %d bodies", r.err, len(r.bodies))
+	}
+	allowed := map[string]bool{"model": true, "stream": true, "stream_options": true, "store": true, "messages": true, "tools": true,
+		"tool_choice": true, "reasoning_effort": true, "max_tokens": true}
+	check := func(label string, body map[string]any) {
+		t.Helper()
+		if body["stream"] != true {
+			t.Errorf("%s: stream = %v, want true", label, body["stream"])
+		}
+		for k, v := range body {
+			if !allowed[k] {
+				t.Errorf("%s: unexpected field %q", label, k)
+			}
+			if k == "stream_options" && jsonOf(t, v) != `{"include_usage":true}` {
+				t.Errorf("%s: stream_options = %s, want {\"include_usage\":true}", label, jsonOf(t, v))
+			}
+		}
+	}
+	v, err := decodeJSON([]byte(r.bodies[0]))
+	sent, ok := asMap(v)
+	if err != nil || !ok {
+		t.Fatalf("sent body is not a JSON object: %s", r.bodies[0])
+	}
+	check("sent", sent)
+	for _, role := range []Role{goRole, {Provider: "openai-compatible", Model: "m", Effort: "default", BaseURL: "http://127.0.0.1:1/v1"}} {
+		body, err := (&Client{}).Render(Request{Role: role, Instructions: "p", Input: user("x")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("render "+role.Provider, body)
+	}
+}

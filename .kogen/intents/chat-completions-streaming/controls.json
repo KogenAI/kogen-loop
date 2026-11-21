@@ -1,0 +1,1 @@
+{"deferred":"Acceptance runs real Go driver tests of the provider package against local httptest fixtures on the simulated clock; the correct implementation is a new Chat stream reader plus edits to chat.go and respond.go and the golden tests, which the Build writes."}
