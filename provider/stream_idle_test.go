@@ -28,7 +28,7 @@ var idleWires = []struct {
 	{"chatgpt", 90 * time.Second, true},
 	{"supergrok", 45 * time.Second, true},
 	{"anthropic", 45 * time.Second, true},
-	{"opencode-go", 45 * time.Second, false},
+	{"opencode-go", DefaultHeaderTimeout, false},
 }
 
 func idleEnv(t *testing.T, wire string, attempts ...obsAttempt) (*env, *obsTransport, Request) {
@@ -91,6 +91,9 @@ func TestStreamIdleFirstByte(t *testing.T) {
 		head, tail := idleAnswer(w.name)
 		full := head + tail
 		want := "no first byte within " + idleSecs(first)
+		if w.name == "opencode-go" {
+			want = "no response headers within " + idleSecs(first)
+		}
 
 		// stalls is every way the first byte can be late, as attempt scripts of a late and an in-time try
 		type stall struct {
@@ -353,6 +356,9 @@ func idleFirst(wire string) time.Duration {
 	if wire == "chatgpt" {
 		return 90 * time.Second
 	}
+	if wire == "opencode-go" {
+		return DefaultHeaderTimeout
+	}
 	return 45 * time.Second
 }
 
@@ -424,7 +430,7 @@ func TestStreamIdleCompatibility(t *testing.T) {
 			}
 			return names
 		}
-		wantClient := []string{"HTTP", "Now", "Sleep", "Cache", "Locker", "Input", "Version", "ResponseBudget"}
+		wantClient := []string{"HTTP", "Now", "Sleep", "Cache", "Locker", "Input", "Version", "ResponseBudget", "HeaderTimeout"}
 		wantRequest := []string{"Role", "Instructions", "Input", "Tools", "ToolChoice", "RequireTool", "Single", "CacheID", "Scope", "Cache", "Context", "Budget"}
 		if got := exported(Client{}); !reflect.DeepEqual(got, wantClient) {
 			t.Errorf("Client options = %v, want %v", got, wantClient)

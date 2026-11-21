@@ -13,8 +13,13 @@ import (
 // Default per-attempt silence limits. The first response progress must come within firstByteChatGPT
 // (ChatGPT) or firstByteDefault (every other provider) of the request's dispatch; afterwards no
 // more than streamIdle may pass between progress reads. Keep-alive bytes are not progress. The
-// limits are absolute within an attempt and never renew the call's budget.
+// limits are absolute within an attempt and never renew the call's budget. A Chat Completions
+// attempt instead waits for its response headers up to the Client's header timeout
+// (DefaultHeaderTimeout), and its idle clock starts at the headers.
 const (
+	// DefaultHeaderTimeout is the Chat Completions header wait used when Client.HeaderTimeout is zero.
+	DefaultHeaderTimeout = 120 * time.Second
+
 	firstByteChatGPT = 90 * time.Second
 	firstByteDefault = 45 * time.Second
 	streamIdle       = 180 * time.Second
@@ -41,6 +46,7 @@ type idleWatch struct {
 	last     time.Time
 	limit    time.Duration
 	idle     bool // progress has arrived: the limit is the idle one
+	headers  bool // the limit is a wait for the response headers
 	timedOut bool
 	body     io.Closer
 
@@ -56,6 +62,9 @@ func (r *run) newWatch(cancel context.CancelFunc) *idleWatch {
 	}
 	now := r.k.c.now
 	w := &idleWatch{now: now, cancel: cancel, last: now(), limit: first, quit: make(chan struct{}), done: make(chan struct{})}
+	if r.k.info.wire == wireChat {
+		w.limit, w.headers = r.k.c.headerTimeout(), true
+	}
 	r.watch = w
 	liveWatches.Add(1)
 	go w.run()
@@ -127,7 +136,7 @@ func (w *idleWatch) observe(at time.Time, progress bool) bool {
 		return true
 	}
 	if progress {
-		w.last, w.limit, w.idle = at, streamIdle, true
+		w.last, w.limit, w.idle, w.headers = at, streamIdle, true, false
 	}
 	return false
 }
@@ -146,6 +155,9 @@ func (w *idleWatch) detail() string {
 	defer w.mu.Unlock()
 	if w.idle {
 		return "stream idle for " + strconv.Itoa(int(streamIdle/time.Second)) + " s"
+	}
+	if w.headers {
+		return "no response headers within " + strconv.Itoa(int(w.limit/time.Second)) + " s"
 	}
 	return "no first byte within " + strconv.Itoa(int(w.limit/time.Second)) + " s"
 }
