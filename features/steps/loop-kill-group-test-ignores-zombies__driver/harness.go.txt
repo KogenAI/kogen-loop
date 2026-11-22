@@ -1,0 +1,97 @@
+package contract_test
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+var wgAccPrctl = map[string]uintptr{"amd64": 157, "arm64": 167, "386": 172, "arm": 172, "riscv64": 167, "loong64": 167, "ppc64le": 171, "s390x": 172}
+
+func init() {
+	if os.Getenv("WGACC_PARENT") != "1" {
+		return
+	}
+	syscall.RawSyscall(wgAccPrctl[runtime.GOARCH], 36, 1, 0)
+	child := exec.Command("sh", "-c", "exit 0")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		os.Exit(2)
+	}
+	fmt.Println(child.Process.Pid)
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+func wgAccState(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return ""
+	}
+	s := string(b)
+	f := strings.Fields(s[strings.LastIndex(s, ")")+1:])
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
+}
+
+// TestWGAcceptance drives the contract package's own waitGone on one fixture chosen by WGACC_CASE.
+func TestWGAcceptance(t *testing.T) {
+	switch os.Getenv("WGACC_CASE") {
+	case "zombie":
+		parent := exec.Command(os.Args[0])
+		parent.Env = append(os.Environ(), "WGACC_PARENT=1")
+		out, err := parent.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := parent.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { parent.Process.Kill(); parent.Wait() })
+		line, err := bufio.NewReader(out).ReadString('\n')
+		pid, perr := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || perr != nil {
+			t.Fatalf("fixture: parent reported %q: %v, %v", line, err, perr)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for !(syscall.Kill(-pid, 0) == nil && wgAccState(pid) == "Z") {
+			if time.Now().After(deadline) {
+				t.Fatalf("fixture: member %d is not an unreaped zombie: state %q", pid, wgAccState(pid))
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		start := time.Now()
+		waitGone(t, pid, "the zombie group")
+		fmt.Printf("WG zombie returned %d\n", time.Since(start).Milliseconds())
+	case "running":
+		sleeper := exec.Command("sleep", "60")
+		sleeper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := sleeper.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { syscall.Kill(-sleeper.Process.Pid, syscall.SIGKILL); sleeper.Wait() })
+		start := time.Now()
+		waitGone(t, sleeper.Process.Pid, "the running group")
+		fmt.Printf("WG running returned %d\n", time.Since(start).Milliseconds())
+	case "gone":
+		cmd := exec.Command("sh", "-c", "exit 0")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		waitGone(t, cmd.Process.Pid, "the vanished group")
+		fmt.Printf("WG gone returned %d\n", time.Since(start).Milliseconds())
+	default:
+		t.Fatal("WGACC_CASE is not set")
+	}
+}
