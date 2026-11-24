@@ -48,7 +48,7 @@ type Task struct {
 	Requires        []string    `json:"requires"`
 }
 
-// DecodeTask reads one task strictly: unknown fields and trailing data are refused.
+// DecodeTask reads one task strictly: duplicate and unknown fields and trailing data are refused.
 func DecodeTask(r io.Reader) (Task, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -57,6 +57,15 @@ func DecodeTask(r io.Reader) (Task, error) {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
 		return Task{}, fmt.Errorf("invalid task: expected one JSON object")
+	}
+	// Validate the complete first value before applying the task schema.
+	var raw json.RawMessage
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&raw); err == nil {
+		scan := json.NewDecoder(bytes.NewReader(raw))
+		scan.UseNumber()
+		if err := rejectDuplicateMembers(scan); err != nil {
+			return Task{}, fmt.Errorf("invalid task: %w", err)
+		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -69,6 +78,41 @@ func DecodeTask(r io.Reader) (Task, error) {
 		return Task{}, fmt.Errorf("invalid task: trailing data after the task object")
 	}
 	return t, nil
+}
+
+// rejectDuplicateMembers walks a syntactically complete JSON value.
+func rejectDuplicateMembers(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch token {
+	case json.Delim('{'):
+		seen := make(map[string]bool)
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key := keyToken.(string)
+			if seen[key] {
+				return fmt.Errorf("duplicate member %q", key)
+			}
+			seen[key] = true
+			if err := rejectDuplicateMembers(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+	case json.Delim('['):
+		for dec.More() {
+			if err := rejectDuplicateMembers(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+	}
+	return err
 }
 
 // Usage is provider-reported usage. Nil means not reported; nothing is estimated.
