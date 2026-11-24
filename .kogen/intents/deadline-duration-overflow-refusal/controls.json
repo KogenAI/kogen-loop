@@ -1,0 +1,71 @@
+{
+  "correct": {
+    "files": {
+      "cmd/kogen-loop/main.go": {
+        "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -19,6 +19,7 @@\n \t\"flag\"\n \t\"fmt\"\n \t\"io\"\n+\t\"math\"\n \t\"os\"\n \t\"path/filepath\"\n \t\"strings\"\n@@ -328,6 +329,9 @@\n \tif t.DeadlineSeconds < 0 {\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n+\tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n+\t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n+\t}\n \tif t.Session.Resume && t.Session.Dir == \"\" {\n \t\treturn bad(\"session.resume needs session.dir\")\n \t}\n"
+      }
+    }
+  },
+  "wrong": [
+    {
+      "name": "no overflow guard",
+      "scenario": "Refuse the first unrepresentable deadline in validation",
+      "step": "Then deadline-duration-overflow-refusal: validation refuses the task, naming \"deadline_seconds\" and the supplied value",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -19,7 +19,6 @@\n \t\"flag\"\n \t\"fmt\"\n \t\"io\"\n-\t\"math\"\n \t\"os\"\n \t\"path/filepath\"\n \t\"strings\"\n@@ -329,9 +328,6 @@\n \tif t.DeadlineSeconds < 0 {\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n-\tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n-\t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n-\t}\n \tif t.Session.Resume && t.Session.Dir == \"\" {\n \t\treturn bad(\"session.resume needs session.dir\")\n \t}\n"
+        }
+      }
+    },
+    {
+      "name": "exclusive upper limit",
+      "scenario": "Accept the largest representable whole-second deadline",
+      "step": "Then deadline-duration-overflow-refusal: validation accepts the task without running a round",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -329,7 +329,7 @@\n \tif t.DeadlineSeconds < 0 {\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n-\tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n+\tif int64(t.DeadlineSeconds) >= math.MaxInt64/int64(time.Second) {\n \t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n \t}\n \tif t.Session.Resume && t.Session.Dir == \"\" {\n"
+        }
+      }
+    },
+    {
+      "name": "zero refused",
+      "scenario": "Accept zero as no task deadline",
+      "step": "Then deadline-duration-overflow-refusal: validation accepts the task without running a round",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -326,7 +326,7 @@\n \tif t.Prompt == \"\" {\n \t\treturn bad(\"prompt is required\")\n \t}\n-\tif t.DeadlineSeconds < 0 {\n+\tif t.DeadlineSeconds <= 0 {\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n \tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n"
+        }
+      }
+    },
+    {
+      "name": "negative accepted",
+      "scenario": "Still refuse negative seconds",
+      "step": "Then deadline-duration-overflow-refusal: validation refuses the negative deadline",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -326,9 +326,6 @@\n \tif t.Prompt == \"\" {\n \t\treturn bad(\"prompt is required\")\n \t}\n-\tif t.DeadlineSeconds < 0 {\n-\t\treturn bad(\"deadline_seconds must not be negative\")\n-\t}\n \tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n \t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n \t}\n"
+        }
+      }
+    },
+    {
+      "name": "diagnostic omits field",
+      "scenario": "Refuse the first unrepresentable deadline in validation",
+      "step": "Then deadline-duration-overflow-refusal: validation refuses the task, naming \"deadline_seconds\" and the supplied value",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -330,7 +330,7 @@\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n \tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n-\t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n+\t\treturn bad(fmt.Sprintf(\"value %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n \t}\n \tif t.Session.Resume && t.Session.Dir == \"\" {\n \t\treturn bad(\"session.resume needs session.dir\")\n"
+        }
+      }
+    },
+    {
+      "name": "diagnostic omits input value",
+      "scenario": "Refuse the first unrepresentable deadline in validation",
+      "step": "Then deadline-duration-overflow-refusal: validation refuses the task, naming \"deadline_seconds\" and the supplied value",
+      "files": {
+        "cmd/kogen-loop/main.go": {
+          "patch": "--- a/cmd/kogen-loop/main.go\n+++ b/cmd/kogen-loop/main.go\n@@ -330,7 +330,7 @@\n \t\treturn bad(\"deadline_seconds must not be negative\")\n \t}\n \tif int64(t.DeadlineSeconds) > math.MaxInt64/int64(time.Second) {\n-\t\treturn bad(fmt.Sprintf(\"deadline_seconds %d exceeds the maximum whole-second duration\", t.DeadlineSeconds))\n+\t\treturn bad(\"deadline_seconds exceeds the maximum whole-second duration\")\n \t}\n \tif t.Session.Resume && t.Session.Dir == \"\" {\n \t\treturn bad(\"session.resume needs session.dir\")\n"
+        }
+      }
+    }
+  ]
+}

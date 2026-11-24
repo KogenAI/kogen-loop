@@ -1,0 +1,43 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"os"
+	"strconv"
+	"testing"
+
+	"github.com/KogenAI/kogen-loop/api"
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+// TestObserveDeadlineValidation reports the real validator's result without running a round.
+func TestObserveDeadlineValidation(t *testing.T) {
+	args := flag.Args()
+	if len(args) != 3 {
+		t.Fatal("want root, deadline seconds, and result path")
+	}
+	n, err := strconv.Atoi(args[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := validateTask(api.Task{
+		Protocol: api.Protocol, Root: args[0], Prompt: "fixture prompt",
+		Role: api.Role{Provider: "chatgpt", Model: "fixture-model"}, DeadlineSeconds: n,
+	})
+	result := map[string]any{"root": root}
+	if err != nil {
+		if e, ok := sys.AsError(err); ok {
+			result["error"] = map[string]any{"class": e.Class, "reason": e.Reason, "detail": e.Detail, "exit": e.Exit}
+		} else {
+			result["error"] = map[string]any{"detail": err.Error()}
+		}
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(args[2], data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
