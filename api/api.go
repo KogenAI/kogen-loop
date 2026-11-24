@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
+	"strings"
 )
 
 const (
@@ -48,7 +50,7 @@ type Task struct {
 	Requires        []string    `json:"requires"`
 }
 
-// DecodeTask reads one task strictly: duplicate and unknown fields and trailing data are refused.
+// DecodeTask reads one task strictly: duplicate, inexact and unknown fields and trailing data are refused.
 func DecodeTask(r io.Reader) (Task, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -66,6 +68,9 @@ func DecodeTask(r io.Reader) (Task, error) {
 		if err := rejectDuplicateMembers(scan); err != nil {
 			return Task{}, fmt.Errorf("invalid task: %w", err)
 		}
+		if err := rejectInexactTaskFields(raw, reflect.TypeOf(Task{})); err != nil {
+			return Task{}, fmt.Errorf("invalid task: %w", err)
+		}
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -78,6 +83,34 @@ func DecodeTask(r io.Reader) (Task, error) {
 		return Task{}, fmt.Errorf("invalid task: trailing data after the task object")
 	}
 	return t, nil
+}
+
+// rejectInexactTaskFields compares decoded object member names with their JSON tags.
+func rejectInexactTaskFields(data json.RawMessage, typ reflect.Type) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		// The typed decoder reports mismatched value types.
+		return nil
+	}
+	for name, value := range members {
+		var field reflect.StructField
+		found := false
+		for _, candidate := range reflect.VisibleFields(typ) {
+			if strings.Split(candidate.Tag.Get("json"), ",")[0] == name {
+				field, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown field %q", name)
+		}
+		if field.Type.Kind() == reflect.Struct {
+			if err := rejectInexactTaskFields(value, field.Type); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // rejectDuplicateMembers walks a syntactically complete JSON value.

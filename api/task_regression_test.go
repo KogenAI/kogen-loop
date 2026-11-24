@@ -55,7 +55,26 @@ func TestDecodeTaskRejectsUnknownNestedField(t *testing.T) {
 	}
 }
 
+func TestDecodeTaskRejectsInexactFieldNames(t *testing.T) {
+	for _, tc := range []struct{ name, text, field string }{
+		{"root", `{"Prompt":"hello"}`, "Prompt"},
+		{"role", `{"role":{"Model":"m"}}`, "Model"},
+		{"session", `{"session":{"Dir":"/tmp/s"}}`, "Dir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := api.DecodeTask(strings.NewReader(tc.text))
+			if err == nil || !strings.Contains(err.Error(), tc.field) || !reflect.DeepEqual(got, api.Task{}) {
+				t.Fatalf("got task %+v, error %v; want zero task and error naming %q", got, err, tc.field)
+			}
+		})
+	}
+}
+
 func TestDecodeTaskAcceptsKnownNestedFields(t *testing.T) {
+	escaped, err := api.DecodeTask(strings.NewReader(`{"pr\u006fmpt":"hello","role":{"m\u006fdel":"m"},"session":{"d\u0069r":"/tmp/s"}}`))
+	if err != nil || escaped.Prompt != "hello" || escaped.Role.Model != "m" || escaped.Session.Dir != "/tmp/s" {
+		t.Fatalf("escaped exact names: task %+v, error %v", escaped, err)
+	}
 	text := " \n" + `{"prompt":"hello",` +
 		`"role":{"provider":"anthropic","model":"m","effort":"high","base_url":"http://example.test"},` +
 		`"session":{"dir":"/tmp/s","resume":true},"tools":["read_file","list_files"]}` + "\t\n"

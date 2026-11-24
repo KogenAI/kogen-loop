@@ -321,6 +321,8 @@ func (s *Session) Round(ctx context.Context, text string) (Result, error) // fir
 
 ### Task (`api.Task`)
 
+JSON field names must match their defined spelling exactly, including in the task, `role`, and `session` objects. Names are compared after JSON escape decoding; unknown fields are refused.
+
 ```json
 {
   "protocol": "kogen-loop/v1",
