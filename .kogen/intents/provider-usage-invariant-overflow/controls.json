@@ -1,0 +1,51 @@
+{
+  "correct": {
+    "files": {
+      "provider/usage.go": {
+        "patch": "--- a/provider/usage.go\n+++ b/provider/usage.go\n@@ -2,6 +2,7 @@\n \n import (\n \t\"fmt\"\n+\t\"math\"\n )\n \n // Usage is the compatible token total of a request or a run (GPT-9): reasoning is a\n@@ -87,8 +88,9 @@\n \t}\n \tk := r.known()\n \tle := func(a, b *int) bool { return a == nil || b == nil || *a <= *b }\n-\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || *k.Cached+*k.Write <= *k.Input\n-\tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || *k.Write30m+*k.Write12h == *k.Write\n+\toverflows := func(a, b int) bool { return a > 0 && b > math.MaxInt-a }\n+\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input\n+\tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write\n \tif !le(k.Cached, k.Input) || !le(k.Write, k.Input) || !le(k.Write30m, k.Write) || !le(k.Write12h, k.Write) || !le(k.Reasoning, k.Output) || !disjoint || !lifetimes {\n \t\treturn UsageInconsistent\n \t}\n"
+      }
+    }
+  },
+  "wrong": [
+    {
+      "name": "unchecked cached and write addition",
+      "scenario": "Cached and write counts overflow together",
+      "step": "Then provider-usage-invariant-overflow: the usage state is \"inconsistent\"",
+      "files": {
+        "provider/usage.go": {
+          "patch": "--- a/provider/usage.go\n+++ b/provider/usage.go\n@@ -89,7 +89,7 @@\n \tk := r.known()\n \tle := func(a, b *int) bool { return a == nil || b == nil || *a <= *b }\n \toverflows := func(a, b int) bool { return a > 0 && b > math.MaxInt-a }\n-\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input\n+\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || *k.Cached+*k.Write <= *k.Input\n \tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write\n \tif !le(k.Cached, k.Input) || !le(k.Write, k.Input) || !le(k.Write30m, k.Write) || !le(k.Write12h, k.Write) || !le(k.Reasoning, k.Output) || !disjoint || !lifetimes {\n \t\treturn UsageInconsistent\n"
+        }
+      }
+    },
+    {
+      "name": "omit the write lifetime relation",
+      "scenario": "Individually in-range write lifetimes overflow together",
+      "step": "Then provider-usage-invariant-overflow: the usage state is \"inconsistent\"",
+      "files": {
+        "provider/usage.go": {
+          "patch": "--- a/provider/usage.go\n+++ b/provider/usage.go\n@@ -90,7 +90,7 @@\n \tle := func(a, b *int) bool { return a == nil || b == nil || *a <= *b }\n \toverflows := func(a, b int) bool { return a > 0 && b > math.MaxInt-a }\n \tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input\n-\tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write\n+\tlifetimes := true\n \tif !le(k.Cached, k.Input) || !le(k.Write, k.Input) || !le(k.Write30m, k.Write) || !le(k.Write12h, k.Write) || !le(k.Reasoning, k.Output) || !disjoint || !lifetimes {\n \t\treturn UsageInconsistent\n \t}\n"
+        }
+      }
+    },
+    {
+      "name": "reject a disjoint sum at the integer limit",
+      "scenario": "Nonzero cached and write counts can sum to the integer limit",
+      "step": "Then provider-usage-invariant-overflow: the usage state is \"known\"",
+      "files": {
+        "provider/usage.go": {
+          "patch": "--- a/provider/usage.go\n+++ b/provider/usage.go\n@@ -89,7 +89,7 @@\n \tk := r.known()\n \tle := func(a, b *int) bool { return a == nil || b == nil || *a <= *b }\n \toverflows := func(a, b int) bool { return a > 0 && b > math.MaxInt-a }\n-\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input\n+\tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input && *k.Cached+*k.Write < math.MaxInt\n \tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write\n \tif !le(k.Cached, k.Input) || !le(k.Write, k.Input) || !le(k.Write30m, k.Write) || !le(k.Write12h, k.Write) || !le(k.Reasoning, k.Output) || !disjoint || !lifetimes {\n \t\treturn UsageInconsistent\n"
+        }
+      }
+    },
+    {
+      "name": "reject a lifetime sum at the integer limit",
+      "scenario": "Both consistency sums can reach the integer limit",
+      "step": "Then provider-usage-invariant-overflow: the usage state is \"known\"",
+      "files": {
+        "provider/usage.go": {
+          "patch": "--- a/provider/usage.go\n+++ b/provider/usage.go\n@@ -90,7 +90,7 @@\n \tle := func(a, b *int) bool { return a == nil || b == nil || *a <= *b }\n \toverflows := func(a, b int) bool { return a > 0 && b > math.MaxInt-a }\n \tdisjoint := k.Cached == nil || k.Write == nil || k.Input == nil || !overflows(*k.Cached, *k.Write) && *k.Cached+*k.Write <= *k.Input\n-\tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write\n+\tlifetimes := k.Write == nil || k.Write30m == nil || k.Write12h == nil || !overflows(*k.Write30m, *k.Write12h) && *k.Write30m+*k.Write12h == *k.Write && *k.Write30m+*k.Write12h < math.MaxInt\n \tif !le(k.Cached, k.Input) || !le(k.Write, k.Input) || !le(k.Write30m, k.Write) || !le(k.Write12h, k.Write) || !le(k.Reasoning, k.Output) || !disjoint || !lifetimes {\n \t\treturn UsageInconsistent\n \t}\n"
+        }
+      }
+    }
+  ]
+}
