@@ -1,0 +1,37 @@
+# Prevent overflow in provider usage sums
+
+Slug: usage-sum-overflow-safe
+Model: not applicable — this is a stateless calculation; the returned state is a classification, not a transition
+Acceptance:
+- .kogen/intents/usage-sum-overflow-safe/acceptance.feature
+- features/steps/usage-sum-overflow-safe__steps.js
+- features/steps/usage-sum-overflow-safe__driver/main.go
+
+Replace the unchecked addition in `loop.SumUsage(us ...api.Usage) api.Usage` with overflow-safe summation for the four provider token counts: `Input`, `Cached`, `Output`, and `Reasoning`. Each category is independent. In a nonempty sum, a category is known only when all usages provide that count and its total fits the target platform's Go `int`. Otherwise return nil for that category, not a wrapped or saturated count. The upper bound is inclusive. Provider-reported known counts are nonnegative; this change adds no validation to provider parsing. (evidence: loop/usage.go; api/api.go; provider/usage.go)
+
+Return `complete` when all four totals are known, `unknown` when none are known, and `partial` otherwise. Zero usages still returns four nil counts and `unknown`. Determine state from the returned counts, not the input state labels, and preserve `Source: "provider"`. There is no error return. Limit implementation and unit-test edits to `loop/usage.go` and `loop/usage_test.go`; do not change provider usage parsing, `UsageOf`, `api.Usage` fields, or callers. (evidence: loop/usage.go; api/api.go; contract/loop_test.go)
+
+## Decisions
+- Keep each usage category independent: if its sum exceeds the platform int range, return nil for that category rather than a wrapped value. (decision: D1, round 1) (constraint: The maximum representable total remains known.) (constraint: Provider parsing and api.Usage fields do not change.) (evidence: loop/usage.go; api/api.go; provider/usage.go) (source: request)
+- Derive the state from the resulting known categories, without changing the established missing-value or empty-sum rules. (decision: D2, round 1) (constraint: Retain other exact category totals and Source "provider".) (evidence: loop/usage.go; contract/loop_test.go) (source: request)
+- Shaper choice for the acceptance driver only: use `int_size` as fixture metadata carrying the compiling Go target's `int` width. It resolves the platform-relative boundary inputs; the assertion compares only the returned `api.Usage`. This is not a product field or a protocol change. (evidence: go.mod; api/api.go) (source: request)
+
+## Source comparison
+- Superseded: `ev-e1e7b2bd` identifies unchecked `int` addition in `loop/usage.go`. Decision D1 replaces it. Acceptance 1 is addressed by the one-category overflow scenario and its unchanged-addition control; the adjacent boundary scenarios keep the maximum and immediately lower totals known.
+- Addressed: Acceptance 2 requires keeping the non-overflowing category totals and deriving state from the counts that remain. Decision D2 and the one-category overflow scenario check all four fields and `partial`, rejecting the whole-result discard control. The all-category overflow scenario checks that no remaining totals means `unknown`.
+- Addressed: Acceptance 3 preserves ordinary complete, partial, unknown, and empty sums. Four preservation scenarios exercise those outcomes and reject changing a missing count to zero or reporting measured zeros for an empty sum. The existing `TestLoopUsageState` stays unchanged. (evidence: contract/loop_test.go)
+- Omitted by scope: provider parsing and `api.Usage` field changes. Production and implementation-test scope is exactly `loop/usage.go` and `loop/usage_test.go`; the feature calls `SumUsage` directly without changing its callers. No conflicting requirements were found. (evidence: loop/usage.go; api/api.go; provider/usage.go)
+
+## Tests
+- A sum beyond the platform `int` limit becomes nil only for the overflowing category, with exact totals and `partial` for the rest: add the mixed overflow case to `TestSumUsageOverflow` in `loop/usage_test.go` (regression)
+- The upper bound and the immediately lower total remain known: add the adjacent representable cases to `TestSumUsageOverflow` (unit)
+- All categories overflowing yields four nil counts and `unknown`: add the all-overflow case to `TestSumUsageOverflow` (unit)
+- Ordinary complete, partial, unknown and empty sums are unchanged: retain `TestLoopUsageState` (evidence: contract/loop_test.go) (existing)
+
+## Feasibility
+- The configured acceptance runner supplies Node and Cucumber; the local probe observed Node v26.13.1, Cucumber 13.3.0, and Go 1.27.2 on darwin/arm64. No provider, credentials, network transport, or data store is involved. The driver gets the target width from `strconv.IntSize`; the 32-bit case was not run here. (evidence: .kogen/project.yaml; go.mod) (probe: exit 0, 1.1 s)
+- Each scenario passes its table rows as a JSON array of four-string rows on stdin to `go run ./features/steps/usage-sum-overflow-safe__driver/main.go`. Columns map to `Input`, `Cached`, `Output`, and `Reasoning` in that order; `nil` means a nil pointer, `max` and its offsets use `math.MaxInt`, and other strings are decimal counts. The driver leaves input state and source unset and calls `loop.SumUsage` with exactly the rows supplied. It emits one JSON object with `int_size` and `usage` (the unchanged `api.Usage` JSON shape). The step compares the entire usage object, reading the decimal lexemes as `BigInt` so adjacent values at the boundary remain distinguishable. Driver failure, including timeout, is a fixture failure, not a usage outcome. (evidence: api/api.go; loop/usage.go)
+- The direct driver probe on unchanged code produced `{"int_size":64,"usage":{"input":-9223372036854775808,"cached":3,"output":11,"reasoning":3,"state":"complete","source":"provider"}}` for the first overflowing case and `{"int_size":64,"usage":{"input":null,"cached":null,"output":null,"reasoning":null,"state":"unknown","source":"provider"}}` for empty input. (probe: exit 0, 1.1 s)
+- The focused contract test passed unchanged (`go test ./loop ./contract -run '^TestLoopUsageState$' -count=1`, exit 0, 0.8 s). The control generation succeeded (exit 0, 0.1 s), and the correct and all seven wrong overlays compiled in scratch with `go build ./loop` (exit 0, 1.6 s).
+- The good observer control accepted actual representable-boundary and ordinary partial results. The bad control independently altered each count, state and source, and replaced a nil with zero; each alteration reached and failed the same result assertion. The initial observer controls returned the same outputs. A scratch edit removed the fixture-metadata assertion (exit 0, 0.1 s); the final observer bytes produced the outputs below (good: exit 0, 0.6 s; bad: exit 1, 0.7 s).
+- evidence: {"id":"usage-sum-observer","kind":"observer","inputs":["loop/usage.go","api/api.go","features/steps/usage-sum-overflow-safe__steps.js","features/steps/usage-sum-overflow-safe__driver/main.go"],"observers":["features/steps/usage-sum-overflow-safe__steps.js","features/steps/usage-sum-overflow-safe__driver/main.go"],"checks":[{"name":"good","command":"\"$KOGEN_NODE\" features/steps/usage-sum-overflow-safe__steps.js good","exit":0,"output":"usage observer accepted exact counts and missing categories\n"},{"name":"bad","command":"\"$KOGEN_NODE\" features/steps/usage-sum-overflow-safe__steps.js bad","exit":1,"output":"usage observer rejected altered counts, state and source\n"}]}
