@@ -82,7 +82,7 @@ func (s *Session) Owned(pid int) bool {
 // ForeignKill is the only implementation of the refusal rule. It is a text filter, not
 // a security boundary: it stops the model's habit of cleaning up by name, not a bypass.
 // It does not see `eval "$(echo ... | base64 -d)"`, `sh -c "$VAR"`, `python -c
-// 'os.kill'`, `find -exec kill`, a script file containing pkill, `busybox killall` or
+// 'os.kill'`, `find -exec kill`, a script file containing pkill or
 // computed ids. A group kill is not a sandbox either, and the exit sweep
 // (Options.KillGroupOnExit) does not reach a process that left the group (setsid,
 // own-session nohup, double-fork daemons, Gradle-style daemons).
@@ -107,6 +107,10 @@ func ForeignKill(command string, owned func(pid int) bool) (rule string, refused
 		switch name {
 		case "pkill", "killall":
 			return RulePkillKillall, true
+		case "busybox":
+			if len(args) > 0 && args[0].text == "killall" {
+				return RulePkillKillall, true
+			}
 		case "kill":
 			if killsForeign(c, args, xargs, cmds, assigned, command, owned) {
 				return RuleKillForeignPid, true
