@@ -11,9 +11,16 @@ func TestForeignKillTable(t *testing.T) {
 	t.Parallel()
 	owned := func(pid int) bool { return pid == 4242 || pid == -4242 }
 	refused := map[string]string{
-		"busybox killall worker":                     RulePkillKillall,
-		"env MODE=fast busybox killall worker":       RulePkillKillall,
-		"sudo timeout 5 /bin/busybox killall worker": RulePkillKillall,
+		`find . -exec killall worker \;`:               RulePkillKillall,
+		`find . -exec killall worker +`:                RulePkillKillall,
+		`find . -execdir kill -9 1234 \;`:              RuleKillForeignPid,
+		`find . -execdir kill 1234 +`:                  RuleKillForeignPid,
+		`find . -exec sudo busybox killall worker \;`:  RulePkillKillall,
+		`find . -exec echo ok \; -exec pkill worker +`: RulePkillKillall,
+		`find . -exec kill 1234`:                       RuleKillForeignPid,
+		"busybox killall worker":                       RulePkillKillall,
+		"env MODE=fast busybox killall worker":         RulePkillKillall,
+		"sudo timeout 5 /bin/busybox killall worker":   RulePkillKillall,
 		"pkill -f x":                  RulePkillKillall,
 		"sudo pkill x":                RulePkillKillall,
 		"/usr/bin/killall x":          RulePkillKillall,
@@ -45,6 +52,11 @@ func TestForeignKillTable(t *testing.T) {
 		}
 	}
 	allowed := []string{
+		`find . -name '*.log' -print`,
+		`find . -exec echo killall \;`,
+		`find . -execdir ls {} +`,
+		`find . -exec kill 4242 \;`,
+		`find . -ok killall worker \;`,
 		"busybox echo killall", "busybox ls",
 		"", "grep -n pkill file", "kill $!", "kill %1", "PID=$!; kill $PID", "pgrep -f x", "ps aux",
 		"pkillall", "mypkill.sh", "kill 4242", "kill -9 4242", "kill -9 -4242", "kill -l",
