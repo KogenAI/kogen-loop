@@ -134,3 +134,47 @@ func TestRunWithoutTaskEndsSessionWithZeroTiming(t *testing.T) {
 		t.Errorf("timing = %#v, want %#v", ended["timing"], wantTiming)
 	}
 }
+
+func TestRunRefusesUnsupportedRequiredCapabilityBeforeSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	task, err := json.Marshal(api.Task{
+		Protocol: api.Protocol, Root: t.TempDir(), Prompt: "prompt",
+		Role: api.Role{Provider: "chatgpt"}, Requires: []string{"subagents"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exit := run([]string{"run", "--task", "-"}, bytes.NewReader(task), &stdout, &stderr)
+	if api.ExitInvalid != 2 {
+		t.Errorf("invalid-task exit code = %d, want 2", api.ExitInvalid)
+	}
+	if exit != api.ExitInvalid {
+		t.Errorf("run exit = %d, want invalid-task exit 2", exit)
+	}
+
+	var events []map[string]any
+	scanner := bufio.NewScanner(&stdout)
+	for scanner.Scan() {
+		var event map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatalf("invalid JSON event: %v", err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %#v, want error then session.ended; stderr = %s", events, stderr.String())
+	}
+	if events[0]["type"] != "error" || events[0]["class"] != "loop" || events[0]["reason"] != "unsupported_capability" {
+		t.Errorf("refusal event = %#v", events[0])
+	}
+	if detail, ok := events[0]["detail"].(string); !ok || !strings.Contains(detail, `"subagents"`) {
+		t.Errorf("refusal detail = %#v, want quoted capability name", events[0]["detail"])
+	}
+	if events[1]["type"] != "session.ended" || events[1]["status"] != "failed" || events[1]["exit"] != float64(2) {
+		t.Errorf("ended event = %#v", events[1])
+	}
+}
