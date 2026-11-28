@@ -1,7 +1,12 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"os"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/api"
 	"testing"
 
 	"github.com/KogenAI/kogen-loop/sys"
@@ -34,4 +39,29 @@ func TestShellEmptyHandleSelection(t *testing.T) {
 			}
 		})
 	}
+	t.Run("invalid command with running handle", func(t *testing.T) {
+		fired := make(chan time.Time)
+		close(fired)
+		tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: func(time.Duration) <-chan time.Time { return fired }}
+		defer tl.EndShellRound()
+		started, err := tl.RunClassified(context.Background(), ShellTool, map[string]any{"command": "sleep 60"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Status string `json:"status"`
+			Handle string `json:"handle"`
+		}
+		if err := json.Unmarshal([]byte(started.Text), &envelope); err != nil || envelope.Status != "running" || envelope.Handle == "" {
+			t.Fatalf("expected running handle: %q, %v", started.Text, err)
+		}
+		got, err := tl.RunClassified(context.Background(), ShellTool, map[string]any{"command": 42, "handle": envelope.Handle})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Text != "error: argument command must be a string" || got.MalformedClass != api.MalformedWrongArgumentType {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
 }

@@ -1,0 +1,56 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/KogenAI/kogen-loop/sys"
+)
+
+func TestShellInvalidCommandWithHandleDriver(t *testing.T) {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(os.Getenv("SICH_ARGS")), &args); err != nil {
+		t.Fatal(err)
+	}
+	fired := make(chan time.Time)
+	close(fired)
+	yieldStart := true
+	root := t.TempDir()
+	tl := &Tools{Root: root, Session: sys.NewWith(os.Environ(), root), Enabled: []string{ShellTool}, ShellAfter: func(wait time.Duration) <-chan time.Time {
+		if wait == 45*time.Second && !yieldStart {
+			return time.After(wait)
+		}
+		return fired
+	}}
+	defer tl.EndShellRound()
+	started, err := tl.RunClassified(context.Background(), ShellTool, map[string]any{"command": "sleep 60"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Status string `json:"status"`
+		Handle string `json:"handle"`
+	}
+	if err := json.Unmarshal([]byte(started.Text), &envelope); err != nil || envelope.Status != "running" || envelope.Handle == "" {
+		t.Fatalf("setup command did not yield a handle: %q %v", started.Text, err)
+	}
+	yieldStart = false
+	for k, v := range args {
+		if v == "$HANDLE" {
+			args[k] = envelope.Handle
+		}
+	}
+	got, err := tl.RunClassified(context.Background(), ShellTool, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(map[string]any{"text": got.Text, "class": got.MalformedClass, "kind": got.ErrorKind, "handle": envelope.Handle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("SICH " + string(b))
+}

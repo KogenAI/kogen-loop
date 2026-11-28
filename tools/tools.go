@@ -984,7 +984,7 @@ func (t *Tools) shell(ctx context.Context, args map[string]any) (Classified, err
 	handle, _ := args["handle"].(string)
 	usableCommand := commandIsString && strings.TrimSpace(cmd) != ""
 	hasHandle := strings.TrimSpace(handle) != ""
-	if !hasHandle && hasCommand && !commandIsString {
+	if hasCommand && !commandIsString {
 		return Classified{Text: "error: argument command must be a string", MalformedClass: api.MalformedWrongArgumentType}, nil
 	}
 	if usableCommand == hasHandle {
