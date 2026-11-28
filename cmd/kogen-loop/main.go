@@ -182,20 +182,29 @@ func execute(args []string, stdin io.Reader, stderr io.Writer, s *sys.Session, o
 	}
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	taskPath := fs.String("task", "", "the task: a JSON file, or - for standard input")
+	var taskPath string
+	taskCount := 0
+	fs.Func("task", "the task: a JSON file, or - for standard input", func(value string) error {
+		taskPath = value
+		taskCount++
+		return nil
+	})
 	invalid := func(detail string) (string, int) {
 		return refuse(sys.Fail(api.ErrClassLoop, api.ErrInvalidTask, detail, api.ExitInvalid))
 	}
 	if err := fs.Parse(args); err != nil {
 		return invalid(err.Error())
 	}
+	if taskCount > 1 {
+		return invalid("--task was given more than once")
+	}
 	if fs.NArg() != 0 {
 		return invalid(fmt.Sprintf("run takes no argument besides --task, got %q", fs.Arg(0)))
 	}
-	if *taskPath == "" {
+	if taskPath == "" {
 		return invalid("run needs --task FILE|- (a task file, or - for standard input)")
 	}
-	task, err := readTask(*taskPath, stdin)
+	task, err := readTask(taskPath, stdin)
 	if err != nil {
 		return refuse(err)
 	}

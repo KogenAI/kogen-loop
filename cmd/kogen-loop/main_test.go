@@ -89,6 +89,55 @@ func TestReadTaskProtocolRefusalPrecedesFieldDecoding(t *testing.T) {
 	}
 }
 
+func TestRunRefusesRepeatedTask(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"different", []string{"run", "--task", "/nonexistent/first.json", "--task", "/nonexistent/second.json"}},
+		{"same", []string{"run", "--task", "/nonexistent/same.json", "--task", "/nonexistent/same.json"}},
+		{"equals", []string{"run", "--task=/nonexistent/same.json", "--task", "/nonexistent/same.json"}},
+		{"stdin", []string{"run", "--task", "-", "--task", "-"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			input := strings.NewReader(`{"protocol":"kogen-loop/v2"}`)
+			if exit := run(tc.args, input, &stdout, &stderr); exit != 2 {
+				t.Errorf("exit = %d, want 2", exit)
+			}
+			if input.Len() == 0 {
+				t.Error("standard input was read")
+			}
+			var events []map[string]any
+			scanner := bufio.NewScanner(&stdout)
+			for scanner.Scan() {
+				var event map[string]any
+				if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, event)
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 2 {
+				t.Fatalf("events = %#v; stderr = %s", events, &stderr)
+			}
+			if events[0]["type"] != "error" || events[0]["class"] != "loop" || events[0]["reason"] != "invalid_task" {
+				t.Errorf("error event = %#v", events[0])
+			}
+			detail, _ := events[0]["detail"].(string)
+			if !strings.Contains(detail, "--task") || !strings.Contains(detail, "more than once") {
+				t.Errorf("detail = %q", detail)
+			}
+			if events[1]["type"] != "session.ended" || events[1]["status"] != "failed" || events[1]["exit"] != float64(2) {
+				t.Errorf("ended event = %#v", events[1])
+			}
+		})
+	}
+}
+
 func TestRunWithoutTaskEndsSessionWithZeroTiming(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run([]string{"run"}, strings.NewReader(""), &stdout, &stderr)
